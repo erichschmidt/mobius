@@ -140,7 +140,7 @@ A few optional flags exist for local test retries and explicit patches. They are
 
 ## Status
 
-**1.0.0** — spec, interview, stop. That is the product.
+**[1.0.0](https://github.com/erichschmidt/mobius/releases/tag/v1.0.0)** — public release. Spec, interview, stop.
 
 ---
 
