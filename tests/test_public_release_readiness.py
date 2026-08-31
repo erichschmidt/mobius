@@ -48,10 +48,8 @@ def test_public_docs_avoid_foundry_product_name():
         assert "inbox" not in text, path
 
 
-def test_public_release_checklist_exists():
-    checklist = Path("PUBLIC_RELEASE_REVIEW.md").read_text(encoding="utf-8")
-    assert "private to public" in checklist.lower() or "visibility" in checklist.lower()
-    assert "secret scan" in checklist.lower()
+def test_public_release_checklist_not_shipped():
+    assert not Path("PUBLIC_RELEASE_REVIEW.md").exists()
 
 
 def test_pyproject_declares_langgraph_dependency():
