@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a problem with Möbius
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do **not** include secrets, credentials, or client data.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        mobius --doctor
+        mobius "..." --context internal
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Möbius version
+      placeholder: mobius --doctor → product_version

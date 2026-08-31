@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m py_compile src/mobius/*.py
+      - run: pytest -q
+      - run: mobius --doctor
+      - name: Build and verify installed wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install build
+          CLEAN=$(mktemp -d)
+          trap 'rm -rf "$CLEAN"' EXIT
+          python -m build --wheel --outdir "$CLEAN/dist"
+          WHEEL=$(python - "$CLEAN/dist" <<'PY'
+          import sys
+          from pathlib import Path
+          wheels = list(Path(sys.argv[1]).glob("mobius-1.0.0-*.whl"))
+          assert len(wheels) == 1, wheels
+          print(wheels[0].resolve())
+          PY
+          )
+          python - "$WHEEL" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as wheel:
+              names = set(wheel.namelist())
+              assert "mobius/cli.py" in names
+              assert "mobius/graph.py" in names
+              assert "mobius/foundry.py" in names
+              entry_points = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
+              assert "mobius = mobius.cli:main" in wheel.read(entry_points).decode()
+              metadata = next(name for name in names if name.endswith(".dist-info/METADATA"))
+              meta_text = wheel.read(metadata).decode()
+              assert "Requires-Dist: langgraph" in meta_text
+          PY
+          python -m venv "$CLEAN/venv"
+          "$CLEAN/venv/bin/pip" install "$WHEEL"
+          mkdir "$CLEAN/home"
+          HOME="$CLEAN/home" "$CLEAN/venv/bin/mobius" --doctor > doctor.json
+          "$CLEAN/venv/bin/python" - <<'PY'
+          import json
+          doctor = json.load(open("doctor.json"))
+          assert doctor["status"] == "pass" and doctor["product_version"] == "1.0"
+          PY

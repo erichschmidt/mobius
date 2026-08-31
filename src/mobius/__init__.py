@@ -1,0 +1,2 @@
+RELEASE_VERSION = "1.0"
+__version__ = f"{RELEASE_VERSION}.0"

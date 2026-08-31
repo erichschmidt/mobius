@@ -1,0 +1,14 @@
+{
+  "goal": "Create a weekly digest of local project status from files already on disk.",
+  "trigger": "Manual command every Friday.",
+  "inputs": ["local Markdown notes in the project folder"],
+  "outputs": ["a local Markdown digest in the project folder"],
+  "tools": ["read-only filesystem"],
+  "memory": "Keep only the latest digest in the project folder.",
+  "cadence": "weekly",
+  "human_gate": "A person reads the local draft. Nothing is sent or published.",
+  "risk_boundary": "Never send, publish, purchase, access credentials, or change production systems.",
+  "success_criteria": ["The digest lists every active project found in the local notes."],
+  "verification_plan": ["Read the digest back from disk and check that each local project appears."],
+  "registration_path": "docs/agents/weekly-digest.md"
+}
