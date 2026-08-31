@@ -17,8 +17,8 @@ def test_readme_is_public_release_ready():
     assert "PUBLIC_RELEASE_REVIEW.md" not in text
     assert "remains **private**" not in text
     assert "inbox" not in lower
-    assert "img.shields.io/badge/CI-passing-brightgreen.svg" in text
-    assert "github.com/erichschmidt/mobius/actions/workflows/ci.yml/badge.svg" not in text
+    assert "img.shields.io/github/actions/workflow/status/erichschmidt/mobius/ci.yml" in text
+    assert "img.shields.io/badge/CI-passing-brightgreen.svg" not in text
     for leftover in ("hermey", "hermes", "silica", "agent foundry", "consciousness"):
         assert leftover not in lower, leftover
 

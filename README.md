@@ -10,7 +10,7 @@ Möbius is a command-line tool. You give it a sentence describing an agent you w
 
 It does not generate the agent. It does not send mail, call the internet, or change any of your systems.
 
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](https://github.com/erichschmidt/mobius/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/erichschmidt/mobius/ci.yml?branch=main&label=CI)](https://github.com/erichschmidt/mobius/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 

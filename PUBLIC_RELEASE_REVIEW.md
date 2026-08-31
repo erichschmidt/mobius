@@ -1,6 +1,6 @@
 # Public release review checklist
 
-Use this checklist **before** changing the GitHub repository visibility from private to public. The codebase is prepared for review; flipping visibility is a deliberate maintainer action.
+Use this checklist before and immediately after changing GitHub repository visibility to **public**.
 
 ## Security (required)
 
@@ -12,9 +12,8 @@ Use this checklist **before** changing the GitHub repository visibility from pri
 
 ## Repository hygiene
 
+- [x] Fresh public history: single root commit on a new empty GitHub repository (no prior PRs, branches, or private commits).
 - [ ] Confirm no `.env`, keys, tokens, client data, or internal hostnames in tracked files.
-- [x] Branch history rewritten to a single public root commit on `main` (old feature branches deleted).
-- [ ] **Still required for a fully clean public repo:** delete and recreate this GitHub repository (or push this tree to a new empty repo). Merged PRs still pin old commits under `refs/pull/*/head`, which a force-push cannot erase.
 - [ ] Confirm `.gitignore` covers `.mobius/`, build artifacts, and secrets.
 
 ## Legal and metadata
@@ -59,13 +58,11 @@ Expected: all tests pass, doctor passes, wheel builds as `mobius-1.0.0-*.whl`, w
 
 ## After going public
 
-- [ ] Switch the README CI badge from the static shields.io image to the live workflow status badge:
-      `https://img.shields.io/github/actions/workflow/status/erichschmidt/mobius/ci.yml?branch=main&label=CI`
-      (GitHub’s native Actions badge 404s while the repo is private, which is why README uses a static badge for now.)
+- [x] README CI badge uses live workflow status (shields.io GitHub Actions badge).
 - [ ] Tag `v1.0.0` and create a GitHub Release with [CHANGELOG.md](CHANGELOG.md) excerpt.
 - [ ] Publish to PyPI if desired (`twine upload dist/*`).
 - [ ] Announce with clear boundaries: spec-only default, no autonomous execution.
 
 ---
 
-**Status:** v1 prepared for public review. Repository remains **private** until you complete this checklist and flip visibility yourself.
+**Status:** v1.0.0 ready for public visibility. Flip visibility in GitHub Settings when the checklist above is complete.
