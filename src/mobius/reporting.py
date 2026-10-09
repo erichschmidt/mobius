@@ -66,29 +66,6 @@ def include_venture_loop(state: Mapping[str, Any]) -> bool:
     return venture.get("status") not in {None, "skipped"}
 
 
-def _result_active(result: Mapping[str, Any] | None) -> bool:
-    if not result:
-        return False
-    status = result.get("status")
-    return status not in {None, "skipped", "not_run", "blocked"}
-
-
-def include_execution_detail(state: Mapping[str, Any]) -> bool:
-    return any(
-        _result_active(state.get(key) or {})
-        for key in (
-            "patch_proposal",
-            "single_change_patch_result",
-            "atomic_change_set_result",
-            "patch_evaluation",
-            "rollback_result",
-            "post_rollback_verifier_result",
-            "local_worker_result",
-            "keep_going_result",
-        )
-    ) or bool(state.get("loop_summary"))
-
-
 def render_markdown_report(state: Mapping[str, Any]) -> str:
     spec = state.get("working_spec") or {}
     scaffold = state.get("scaffold_recommendation") or {}
@@ -143,11 +120,11 @@ def render_markdown_report(state: Mapping[str, Any]) -> str:
     if include_foundry_detail(state):
         lines += ["## Intake", ""]
         lines += _json_block(state.get("agent_foundry_contract", {}))
-        lines += ["## Foundry Intake", ""]
+        lines += ["## Agent Intake", ""]
         lines += _json_block(state.get("foundry_intake", {}))
-        lines += ["## Foundry Approval Gates", ""]
+        lines += ["## Approval Gates", ""]
         lines += _json_block(state.get("approval_gates", []))
-        lines += ["## Foundry Readiness", ""]
+        lines += ["## Readiness", ""]
         lines += _json_block(state.get("readiness", {}))
         lines += ["## Runtime Recommendation", ""]
         lines += _json_block(state.get("runtime_recommendation", {}))
@@ -210,37 +187,6 @@ def render_markdown_report(state: Mapping[str, Any]) -> str:
         f"- Checkpoint: `{state.get('checkpoint_path')}`",
         "",
     ]
-
-    if include_execution_detail(state):
-        lines += ["## Execution Loop", ""]
-        lines += _json_block(state.get("execution_loop", {}))
-        if state.get("patch_proposal"):
-            lines += ["## Patch Proposal", ""]
-            lines += _json_block(state.get("patch_proposal", {}))
-        if _result_active(state.get("single_change_patch_result") or {}):
-            lines += ["## Single-Change Patch Worker", ""]
-            lines += _json_block(state.get("single_change_patch_result", {}))
-        if _result_active(state.get("atomic_change_set_result") or {}):
-            lines += ["## Atomic Change Set", ""]
-            lines += _json_block(state.get("atomic_change_set_result", {}))
-        if state.get("patch_evaluation"):
-            lines += ["## Patch Evaluation and Rollback Recommendation", ""]
-            lines += _json_block(state.get("patch_evaluation", {}))
-        if _result_active(state.get("rollback_result") or {}):
-            lines += ["## Guarded Rollback", ""]
-            lines += _json_block(state.get("rollback_result", {}))
-        if _result_active(state.get("post_rollback_verifier_result") or {}):
-            lines += ["## Post-Rollback Verifier", ""]
-            lines += _json_block(state.get("post_rollback_verifier_result", {}))
-        if state.get("loop_summary"):
-            lines += ["## Loop Summary", ""]
-            lines += _json_block(state.get("loop_summary", {}))
-        if _result_active(state.get("local_worker_result") or {}):
-            lines += ["## Local Worker Adapter", ""]
-            lines += _json_block(state.get("local_worker_result", {}))
-        if state.get("keep_going_result"):
-            lines += ["## Keep-Going Loop", ""]
-            lines += _json_block(state.get("keep_going_result", {}))
 
     if state.get("interview_questions"):
         lines += ["## Interview Questions Before Execution", ""]

@@ -1,6 +1,6 @@
-"""Möbius v1 Agent Foundry intake, risk, readiness, and artifact helpers.
+"""Möbius agent intake, risk, readiness, and artifact helpers.
 
-The Foundry is deliberately spec-only. It classifies requested authority and
+Agent intake is deliberately spec-only. It classifies requested authority and
 writes bounded artifacts; it never builds, registers, schedules, deploys, or
 executes the proposed agent.
 """
@@ -222,7 +222,7 @@ def _contains_secret(value: Any) -> bool:
 
 def reject_secret_values(*values: Any) -> None:
     if any(_contains_secret(value) for value in values if value is not None):
-        raise ValueError("secret-looking value detected; remove credentials before Foundry intake")
+        raise ValueError("secret-looking value detected; remove credentials before agent intake")
 
 
 def validate_text_inputs(objective: Any, context_hint: Any) -> tuple[str, str | None]:
@@ -246,7 +246,7 @@ def validate_answers(payload: dict[str, Any] | None) -> dict[str, Any]:
     if payload is None:
         return {}
     if not isinstance(payload, dict):
-        raise ValueError("Foundry answers must be a JSON object")
+        raise ValueError("agent-intake answers must be a JSON object")
     raw = dict(payload)
     if "answers" in raw:
         nested = raw.pop("answers")
@@ -257,7 +257,7 @@ def validate_answers(payload: dict[str, Any] | None) -> dict[str, Any]:
         raw = nested
     unknown = sorted(set(raw) - set(FOUNDRY_DIMENSIONS))
     if unknown:
-        raise ValueError(f"unknown Foundry answer keys: {', '.join(unknown)}")
+        raise ValueError(f"unknown agent-intake answer keys: {', '.join(unknown)}")
     _json_depth(raw)
     reject_secret_values(raw)
     clean: dict[str, Any] = {}
@@ -391,7 +391,7 @@ def assess_risk_sources(objective: str, context: str | None, answers: dict[str, 
                     "source_field": source_field,
                     "evidence": evidence,
                     "ambiguous": ambiguous,
-                    # v2.5 compatibility aliases
+                    # compatibility aliases for older readers
                     "action": action,
                     "disposition": classification,
                 })

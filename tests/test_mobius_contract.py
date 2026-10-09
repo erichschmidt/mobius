@@ -21,8 +21,7 @@ def test_graph_node_order_contains_core_governance_steps():
 def test_doctor_passes_in_repo_export():
     result = mobius.run_doctor()
     assert result["status"] == "pass", result
-    assert result["checks"]["app_root_safety"] == "pass"
-    assert result["checks"]["worker_command_safety"] == "pass"
+    assert result["checks"]["artifact_root_safety"] == "pass"
 
 
 def test_doctor_does_not_access_legacy_fixed_tmp_path(monkeypatch):
@@ -44,75 +43,8 @@ def test_doctor_does_not_access_legacy_fixed_tmp_path(monkeypatch):
     assert result["status"] == "pass", result
 
 
-def test_local_worker_rejects_shell_chaining(tmp_path, monkeypatch):
-    app_root = tmp_path / ".mobius"
-    app_root.mkdir()
-    monkeypatch.setattr(mobius, "APP_DIR", app_root)
-
-    result = mobius.run_local_worker_commands(
-        ["python3 -m pytest --version; printf MOBIUS_PREFIX_BYPASS"],
-        app_root,
-        max_commands=1,
-        timeout_seconds=30,
-    )
-
-    assert result["status"] == "blocked"
-    assert result["runs"][0]["allowed"] is False
-    assert "MOBIUS_PREFIX_BYPASS" not in result["runs"][0].get("stdout_tail", "")
-
-    blocked_state = mobius.execute_local_worker_adapter({
-        "mode": "bounded_control_loop",
-        "execute_local": True,
-        "worker_commands": ["python3 -m pytest --version; printf MOBIUS_PREFIX_BYPASS"],
-        "budget_policy": {"max_worker_runs": 1, "max_minutes": 1},
-        "side_effects_performed": [],
-    })
-    assert blocked_state["local_worker_result"]["status"] == "blocked"
-    assert blocked_state.get("side_effects_performed") == []
-
-    (app_root / "probe.py").write_text("value = 1\n")
-    monkeypatch.setenv("PATH", "")
-    monkeypatch.setenv("PYTHONPATH", "/tmp/untrusted-pythonpath")
-    valid = mobius.run_local_worker_commands(
-        ["python3 -m py_compile probe.py"],
-        app_root,
-        max_commands=1,
-        timeout_seconds=30,
-    )
-    assert valid["status"] == "pass"
-    assert valid["runs"][0]["allowed"] is True
-
-    escaped = mobius.run_local_worker_commands(
-        ["python3 -m py_compile ../outside.py"],
-        app_root,
-        max_commands=1,
-        timeout_seconds=30,
-    )
-    assert escaped["status"] == "blocked"
 
 
-def test_legacy_execution_records_actual_side_effects(tmp_path, monkeypatch):
-    app_root = tmp_path / ".mobius"
-    app_root.mkdir()
-    target = app_root / "target.txt"
-    target.write_text("before")
-    monkeypatch.setattr(mobius, "APP_DIR", app_root)
-
-    result = mobius.apply_approved_patch({
-        "mode": "bounded_control_loop",
-        "execute_patch": True,
-        "propose_patch": False,
-        "side_effects_performed": [],
-        "patch_request": {
-            "file_path": str(target),
-            "old_string": "before",
-            "new_string": "after",
-        },
-    })
-
-    assert target.read_text() == "after"
-    assert result["single_change_patch_result"]["status"] == "pass"
-    assert result["side_effects_performed"] == ["single_change_patch"]
 
 
 def test_basic_run_writes_artifacts(tmp_path, monkeypatch):
@@ -187,3 +119,25 @@ def test_quality_review_spec_foundry_path_still_passes():
     assert out["quality_status"] == "pass"
     assert out["quality_score"] >= 80
 
+
+
+def test_spec_pipeline_has_no_execution_steps():
+    # Möbius writes specs and stops: no step may run commands or edit files.
+    banned = ("patch", "rollback", "worker", "keep_going", "change_set", "execute")
+    assert not [node for node in mobius.GRAPH_NODE_ORDER if any(word in node for word in banned)]
+    for name in ("apply_single_change_patch", "run_local_worker_commands", "run_keep_going_loop"):
+        assert not hasattr(mobius, name)
+
+
+def test_cli_offers_no_execution_flags(capsys, monkeypatch):
+    import pytest
+    from mobius import cli
+
+    monkeypatch.setattr("sys.argv", ["mobius", "--help"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    help_text = capsys.readouterr().out
+    for flag in ("--execute", "--patch", "--keep-going", "--bounded-loop", "--self-patch",
+                 "--worker-command", "--rollback", "--change-set", "--foundry"):
+        assert flag not in help_text
+    assert "--agent-intake" in help_text

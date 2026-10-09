@@ -1,4 +1,4 @@
-"""Mobius v2.7 operator decision surface.
+"""Möbius operator decision surface.
 
 Keeps the daily loop usable: a short brief per run, an append-only outcome
 log, and a learning report. Does not execute work, patch code, or grant

@@ -1,6 +1,6 @@
 [project]
 name = "mobius"
-version = "1.0.0"
+version = "2.0.0"
 description = "Turn a vague agent idea into an inspectable spec, then stop."
 readme = "README.md"
 license = {text = "MIT"}

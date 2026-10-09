@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
-"""Möbius v1 — pre-agent constitution.
+"""Möbius — pre-agent constitution.
 
 Turns a vague objective into an inspectable spec, a human-readable brief,
-and (when needed) interview questions. Does not build or run agents by default.
+and (when needed) interview questions. It never builds or runs agents, runs
+commands, or edits files outside its own .mobius/ artifact folder.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 import os
 from typing import Any, Literal, TypedDict
 import json
 import re
-import shlex
 import subprocess
 import sys
-import tempfile
 
 from . import RELEASE_VERSION
 from . import foundry
-from . import keep_going
 from . import operator_surface
 from . import reporting
 
@@ -31,10 +28,10 @@ except Exception:  # pragma: no cover - tests verify LangGraph in this env
     END = "__end__"
     StateGraph = None  # type: ignore
 
-GoalType = Literal["code", "research", "writing", "system_admin", "obsidian_project", "business_ops", "unknown"]
+GoalType = Literal["code", "research", "writing", "system_admin", "notes_project", "business_ops", "unknown"]
 RiskLevel = Literal["low", "medium", "high"]
-ScaffoldContext = Literal["internal", "client_work", "public_repo", "throwaway_spike", "obsidian_only", "unknown"]
-Decision = Literal["ready_to_execute", "spec_ready", "needs_interview", "human_approval_required"]
+ScaffoldContext = Literal["internal", "client_work", "public_repo", "throwaway_spike", "notes_only", "unknown"]
+Decision = Literal["spec_ready", "needs_interview", "human_approval_required"]
 
 APP_DIR = Path(os.environ.get("MOBIUS_APP_DIR", Path.cwd() / ".mobius")).absolute()
 # Self-patch lane root: the package source tree itself. Only reachable via
@@ -64,33 +61,14 @@ GRAPH_NODE_ORDER = [
     "build_approval_packet",
     "finalize_foundry_spec",
     "export_json_spec",
-    "build_patch_proposal",
-    "apply_approved_patch",
-    "apply_approved_change_set",
-    "execute_single_change_patch_worker",
-    "execute_local_worker_adapter",
-    "run_keep_going_loop",
-    "evaluate_patch_and_verifier",
-    "execute_guarded_rollback",
-    "execute_post_rollback_verifier",
     "quality_review_spec",
     "write_checkpoint",
     "write_report",
     "record_run_history",
 ]
 
-FOUNDRY_EXECUTION_NODES = {
-    "build_patch_proposal",
-    "apply_approved_patch",
-    "apply_approved_change_set",
-    "execute_single_change_patch_worker",
-    "execute_local_worker_adapter",
-    "run_keep_going_loop",
-    "evaluate_patch_and_verifier",
-    "execute_guarded_rollback",
-    "execute_post_rollback_verifier",
-}
-FOUNDRY_NODE_ORDER = [node for node in GRAPH_NODE_ORDER if node not in FOUNDRY_EXECUTION_NODES]
+# Möbius only writes specs. Agent intake and plain objectives share one pipeline.
+FOUNDRY_NODE_ORDER = list(GRAPH_NODE_ORDER)
 
 RISK_TERMS = {
     "send", "email", "post", "publish", "delete", "remove", "trade", "buy", "purchase",
@@ -100,7 +78,7 @@ CODE_TERMS = {"build", "code", "app", "script", "cli", "api", "test", "repo", "i
 RESEARCH_TERMS = {"research", "compare", "evaluate", "analyze", "find", "source", "summarize", "investigate"}
 WRITING_TERMS = {"write", "draft", "article", "post", "copy", "brief", "memo", "proposal"}
 SYSTEM_TERMS = {"server", "cron", "config", "env", "service", "logs", "backup", "dashboard"}
-OBSIDIAN_TERMS = {"obsidian", "vault"}
+NOTES_TOOL_TERMS = {"obsidian", "vault"}
 BUSINESS_TERMS = {"client", "lead", "sales", "campaign", "sponsor", "launch"}
 
 
@@ -153,30 +131,8 @@ class MobiusState(TypedDict, total=False):
     verifier_plan: list[str]
     budget_policy: dict[str, Any]
     execution_loop: dict[str, Any]
-    execute_local: bool
-    worker_commands: list[str]
-    self_patch: bool
     json_spec_path: str
     checkpoint_path: str
-    local_worker_result: dict[str, Any]
-    execute_patch: bool
-    patch_request: dict[str, Any]
-    single_change_patch_result: dict[str, Any]
-    patch_evaluation: dict[str, Any]
-    execute_rollback: bool
-    rollback_result: dict[str, Any]
-    execute_post_rollback_verify: bool
-    post_rollback_commands: list[str]
-    post_rollback_verifier_result: dict[str, Any]
-    propose_patch: bool
-    patch_proposal: dict[str, Any]
-    approval_decisions: dict[str, bool]
-    bounded_loop: bool
-    keep_going: bool
-    keep_going_result: dict[str, Any]
-    execute_change_set: bool
-    change_set_request: dict[str, Any]
-    atomic_change_set_result: dict[str, Any]
     loop_summary: dict[str, Any]
     resumed_from_checkpoint: str
     quality_score: int
@@ -230,8 +186,8 @@ def classify_goal(state: MobiusState) -> MobiusState:
         gt = "writing"
     elif _contains_any(text, SYSTEM_TERMS):
         gt = "system_admin"
-    elif _contains_any(text, OBSIDIAN_TERMS):
-        gt = "obsidian_project"
+    elif _contains_any(text, NOTES_TOOL_TERMS):
+        gt = "notes_project"
     elif _contains_any(text, BUSINESS_TERMS):
         gt = "business_ops"
     else:
@@ -258,7 +214,7 @@ def define_goal_rubric(state: MobiusState) -> MobiusState:
             "criteria": ["pre_state_capture", "backup_or_checkpoint", "post_state_verification", "rollback_path"],
             "verifier_focus": "before/after command evidence and safe rollback notes",
         },
-        "obsidian_project": {
+        "notes_project": {
             "criteria": ["vault_path_validity", "link_integrity", "para_placement", "read_back_verification"],
             "verifier_focus": "correct vault path, readable note, links/index updates, and no orphan artifacts",
         },
@@ -310,7 +266,7 @@ def _scaffold_recommendation(context: ScaffoldContext) -> dict[str, str]:
             "why": "Spikes should prove the idea cheaply before overbuilding.",
             "avoid": "Do not add heavy frameworks until the idea survives a real run.",
         },
-        "obsidian_only": {
+        "notes_only": {
             "location": "the vault or knowledge-base folder named in the objective",
             "stack": "Markdown, plus a wrapper script only if the job repeats",
             "testing": "read-back and link/path checks",
@@ -347,8 +303,11 @@ def reason_about_scaffold(state: MobiusState) -> MobiusState:
         "public": "public_repo",
         "throwaway_spike": "throwaway_spike",
         "spike": "throwaway_spike",
-        "obsidian_only": "obsidian_only",
-        "obsidian": "obsidian_only",
+        "notes_only": "notes_only",
+        "notes": "notes_only",
+        # older spellings
+        "notes_only": "notes_only",
+        "obsidian": "notes_only",
     }
 
     if hint in explicit:
@@ -360,7 +319,7 @@ def reason_about_scaffold(state: MobiusState) -> MobiusState:
     elif "spike" in text or "prototype" in text or "experiment" in text:
         context = "throwaway_spike"
     elif "obsidian" in text or "vault" in text:
-        context = "obsidian_only"
+        context = "notes_only"
     elif "internal" in text or state.get("goal_type") in {"code", "system_admin", "research"}:
         context = "internal"
     else:
@@ -394,18 +353,18 @@ def build_working_spec(state: MobiusState) -> MobiusState:
         "expected_artifacts": [],
     }
     if state.get("mode") == "foundry_spec_only":
-        spec["agent_foundry"] = {
-            "status": "active_foundry_spec_only",
+        spec["agent_intake"] = {
+            "status": "active_spec_only",
             "front_door": "raw_agent_idea_to_interviewed_agent_spec",
             "output_contract": "Agent Spec plus one advisory runtime recommendation; no build or execution",
         }
     if goal_type == "code":
         spec["expected_artifacts"] = ["source code", "tests", "wrapper or run command", "final run report"]
     elif goal_type == "research":
-        spec["expected_artifacts"] = ["source-grounded findings", "comparison/scoring", "Obsidian/report artifact"]
+        spec["expected_artifacts"] = ["source-grounded findings", "comparison/scoring", "notes or report artifact"]
     elif goal_type == "writing":
         spec["expected_artifacts"] = ["draft", "quality review", "saved document"]
-    elif goal_type == "obsidian_project":
+    elif goal_type == "notes_project":
         spec["expected_artifacts"] = ["Markdown note/update", "link/index update", "read-back verification"]
     else:
         spec["expected_artifacts"] = ["clarified spec", "success criteria", "final report"]
@@ -425,7 +384,7 @@ def build_venture_loop(state: MobiusState) -> MobiusState:
     loop = {
         "version": "mobius.venture_loop.v0.1",
         "status": "ready_option",
-        "positioning": "Domain extension loop that feeds better product/business objectives into Mobius v2.0's bounded execution control layer.",
+        "positioning": "Domain extension that sharpens product and business ideas into clearer objectives before an agent spec is written.",
         "artifact_sequence": [
             "idea_intake",
             "problem_customer_hypothesis",
@@ -476,7 +435,7 @@ def build_venture_loop(state: MobiusState) -> MobiusState:
 
 
 def build_agent_foundry_contract(state: MobiusState) -> MobiusState:
-    """Build the v2.5 spec-only Foundry intake after risk is known."""
+    """Build the spec-only agent intake after risk is known."""
     objective = state.get("objective", "")
     active = state.get("mode") == "foundry_spec_only"
     contract = foundry.contract("active" if active else "available", str(state.get("risk_level", "low")))
@@ -564,7 +523,7 @@ def generate_interview_if_needed(state: MobiusState) -> MobiusState:
     if scaffold == "unknown":
         qs.append("What context should this run in: internal, client/work, public repo, notes-only, or throwaway spike?")
     if ambiguity >= 4:
-        qs.append("What artifact should count as done: code/app, CLI, report, Obsidian note, PR, or something else?")
+        qs.append("What artifact should count as done: code/app, CLI, report, note, PR, or something else?")
         qs.append("What is the smallest useful version you would accept for v0?")
     if risk in {"medium", "high"}:
         qs.append("Should Mobius operate draft-only, or is it allowed to make local changes after backups?")
@@ -644,7 +603,7 @@ def design_budget_policy(state: MobiusState) -> MobiusState:
             "human approval boundary encountered",
         ],
     }
-    if risk_reasons and state.get("decision") in {"ready_to_execute", "spec_ready"} and (state.get("foundry_intake") or {}).get("status") == "not_applicable":
+    if risk_reasons and state.get("decision") in {"spec_ready"} and (state.get("foundry_intake") or {}).get("status") == "not_applicable":
         existing_questions = list(state.get("interview_questions") or [])
         existing_questions.append("This objective may create token/cost runaway risk. Confirm the budget cap, max iterations, and whether API-metered execution is allowed.")
         return {**state, "budget_policy": policy, "decision": "needs_interview", "interview_questions": existing_questions}
@@ -701,7 +660,6 @@ def _safe_json_value(value: Any) -> Any:
     return str(value)
 
 
-
 def apply_goal_rubric_score(state: MobiusState) -> MobiusState:
     rubric = state.get("goal_rubric") or {}
     criteria = list(rubric.get("criteria") or [])
@@ -735,19 +693,13 @@ def apply_goal_rubric_score(state: MobiusState) -> MobiusState:
 
 def build_approval_packet(state: MobiusState) -> MobiusState:
     required: list[str] = []
-    if state.get("execute_patch") or state.get("propose_patch"):
-        required.append("patch")
-    if state.get("execute_change_set"):
-        required.append("change_set")
-    if state.get("execute_rollback"):
-        required.append("rollback")
     if state.get("decision") == "human_approval_required":
         required.append("human")
     seen: list[str] = []
     for item in required:
         if item not in seen:
             seen.append(item)
-    approvals = state.get("approval_decisions") or {}
+    approvals: dict[str, bool] = {}
     packet = {
         "version": "mobius.approval_packet.v2.0",
         "required_approvals": seen,
@@ -784,7 +736,7 @@ def define_product_contract(state: MobiusState) -> MobiusState:
     rubric_score = state.get("rubric_score") or {}
     product_status = {
         "status": "ready" if rubric_score.get("passed", False) and state.get("decision") != "needs_interview" else "needs_review",
-        "reason": "v1 core loop: spec, Foundry intake, checkpointing, history, operator brief, and doctor are available.",
+        "reason": "Core loop: spec, agent intake, checkpointing, history, operator brief, and doctor are available.",
     }
     return {**state, "product_contract": contract, "product_status": product_status}
 
@@ -858,18 +810,18 @@ def build_method_basis_ledger(state: MobiusState) -> MobiusState:
     goal_type = state.get("goal_type", "unknown")
     context = state.get("scaffold_context", "unknown")
     objective = state.get("objective", "").lower()
-    skills = ["notes-first-reasoning"] if context in {"obsidian_only", "internal", "client_work"} else []
+    practices = ["ground-in-existing-notes"] if context in {"notes_only", "internal", "client_work"} else []
     if goal_type == "business_ops" or any(term in objective for term in ["launch", "sponsor", "business", "validation"]):
-        skills.append("business-idea-validation")
+        practices.append("validate-the-business-case")
     if goal_type == "code" or any(term in objective for term in ["repo", "implement", "test", "push"]):
-        skills.append("test-driven-development")
+        practices.append("test-first")
     if "dashboard" in objective or "html" in objective:
-        skills.append("claude-design")
+        practices.append("design-review")
     ledger = {
-        "version": "mobius.method_basis_ledger.v2.2",
-        "recommended_skills": list(dict.fromkeys(skills)),
+        "version": "mobius.method_basis_ledger.v3.0",
+        "recommended_practices": list(dict.fromkeys(practices)),
         "source_hierarchy": [
-            "obsidian_project_notes",
+            "project_notes",
             "local_repo_or_files",
             "live_tool_state",
             "web_sources",
@@ -1023,7 +975,7 @@ def build_subagent_delegation_matrix(state: MobiusState) -> MobiusState:
             "approval": "read-only",
         },
     ]
-    if goal_type in {"writing", "business_ops", "obsidian_project"}:
+    if goal_type in {"writing", "business_ops", "notes_project"}:
         base_roles.append({
             "name": "artifact_writer",
             "description": "Turn ledgers and outline contracts into sectioned Markdown/HTML artifacts.",
@@ -1038,7 +990,7 @@ def build_subagent_delegation_matrix(state: MobiusState) -> MobiusState:
         "state_excluded_from_child_return": ["raw_tool_output", "credentials", "full_transcript", "unverified_intermediate_notes"],
         "parallelism_policy": "researcher and reviewer may run independently; builder waits for approval packet and preflight.",
         "high_risk_override": "If risk_level is high, subagents may draft plans/reviews only; execution remains blocked until explicit approval.",
-        "recommended_now": risk_level != "high" and goal_type in {"code", "research", "writing", "business_ops", "obsidian_project"},
+        "recommended_now": risk_level != "high" and goal_type in {"code", "research", "writing", "business_ops", "notes_project"},
     }
     return {**state, "subagent_delegation_matrix": matrix}
 
@@ -1294,521 +1246,16 @@ def export_json_spec(state: MobiusState) -> MobiusState:
     return {**state, "json_spec_path": str(path)}
 
 
-def apply_single_change_patch(file_path: str, old_string: str, new_string: str, description: str = "", allowed_root: Path | None = None) -> dict[str, Any]:
-    target = Path(file_path).resolve()
-    root = (allowed_root or APP_DIR).resolve()
-    if not _is_inside_patch_root(target, root):
-        return {"status": "blocked", "reason": "patch target outside approved patch root", "file_path": str(target)}
-    if not target.exists() or not target.is_file():
-        return {"status": "blocked", "reason": "patch target must be an existing file", "file_path": str(target)}
-    if not old_string:
-        return {"status": "blocked", "reason": "old_string is required"}
-    text = target.read_text()
-    count = text.count(old_string)
-    if count != 1:
-        return {"status": "blocked", "reason": f"old_string must appear exactly once; found {count}", "replacement_count": count}
-    backup_path = target.with_name(f"{target.name}.backup_{_new_run_id()}")
-    backup_path.write_text(text)
-    target.write_text(text.replace(old_string, new_string, 1))
-    return {
-        "status": "pass",
-        "file_path": str(target),
-        "backup_path": str(backup_path),
-        "replacement_count": 1,
-        "description": description,
-    }
-
-
-def _preflight_change(change: dict[str, Any], allowed_root: Path | None = None) -> dict[str, Any]:
-    target = Path(str(change.get("file_path", ""))).resolve()
-    root = (allowed_root or APP_DIR).resolve()
-    old_string = str(change.get("old_string", ""))
-    if not _is_inside_patch_root(target, root):
-        return {"status": "blocked", "reason": "change target outside approved patch root", "file_path": str(target)}
-    if not target.exists() or not target.is_file():
-        return {"status": "blocked", "reason": "change target must be an existing file", "file_path": str(target)}
-    if not old_string:
-        return {"status": "blocked", "reason": "old_string is required", "file_path": str(target)}
-    text = target.read_text()
-    count = text.count(old_string)
-    if count != 1:
-        return {"status": "blocked", "reason": f"old_string must appear exactly once; found {count}", "replacement_count": count, "file_path": str(target)}
-    return {"status": "ready", "file_path": str(target), "text": text}
-
-
-def apply_atomic_change_set(changes: list[dict[str, Any]], description: str = "", allowed_root: Path | None = None) -> dict[str, Any]:
-    if not changes:
-        return {"status": "blocked", "reason": "at least one change is required"}
-    if len(changes) > 5:
-        return {"status": "blocked", "reason": "change set exceeds max 5 files", "change_count": len(changes)}
-    preflight = [_preflight_change(change, allowed_root=allowed_root) for change in changes]
-    blocked = [item for item in preflight if item.get("status") != "ready"]
-    if blocked:
-        return {"status": "blocked", "reason": "change set preflight failed", "failures": blocked, "change_count": len(changes)}
-    targets = [item["file_path"] for item in preflight]
-    if len(set(targets)) != len(targets):
-        return {"status": "blocked", "reason": "change set targets must be unique", "change_count": len(changes)}
-    run_id = _new_run_id()
-    backups: list[dict[str, str]] = []
-    try:
-        for change, ready in zip(changes, preflight):
-            target = Path(str(ready["file_path"]))
-            text = str(ready["text"])
-            backup_path = target.with_name(f"{target.name}.backup_{run_id}")
-            backup_path.write_text(text)
-            backups.append({"file_path": str(target), "backup_path": str(backup_path)})
-        for change, ready in zip(changes, preflight):
-            target = Path(str(ready["file_path"]))
-            text = str(ready["text"])
-            target.write_text(text.replace(str(change["old_string"]), str(change["new_string"]), 1))
-    except Exception as exc:
-        for item in backups:
-            target = Path(item["file_path"])
-            backup = Path(item["backup_path"])
-            if backup.exists():
-                target.write_text(backup.read_text())
-        return {"status": "rolled_back", "reason": f"change set apply failed: {exc}", "backups": backups, "change_count": len(changes)}
-    return {"status": "pass", "description": description, "change_count": len(changes), "backups": backups}
-
-
-def _record_side_effect(state: MobiusState, label: str) -> list[str]:
-    effects = list(state.get("side_effects_performed") or [])
-    if label not in effects:
-        effects.append(label)
-    return effects
-
-
-
-def build_patch_proposal(state: MobiusState) -> MobiusState:
-    if state.get("mode") == "foundry_spec_only":
-        return {**state, "patch_proposal": {"status": "blocked", "reason": "Foundry mode is spec-only"}}
-    if not state.get("propose_patch"):
-        return {**state, "patch_proposal": {"status": "skipped", "reason": "propose_patch not enabled"}}
-    preflight = _self_patch_preflight(state)
-    if preflight is not None:
-        return {**state, "patch_proposal": preflight}
-    request = state.get("patch_request") or {}
-    required = ["file_path", "old_string", "new_string"]
-    missing = [key for key in required if key not in request]
-    if missing:
-        return {**state, "patch_proposal": {"status": "blocked", "reason": f"missing patch_request keys: {', '.join(missing)}"}}
-    target = Path(str(request["file_path"])).resolve()
-    root = _patch_allowed_root(state)
-    if not _is_inside_patch_root(target, root):
-        return {**state, "patch_proposal": {"status": "blocked", "reason": "proposal target outside approved patch root", "file_path": str(target)}}
-    return {**state, "patch_proposal": {
-        "status": "proposed",
-        "file_path": str(target),
-        "old_string": str(request["old_string"]),
-        "new_string": str(request["new_string"]),
-        "description": str(request.get("description", "")),
-        "requires_approval": True,
-    }}
-
-
-def apply_approved_patch(state: MobiusState) -> MobiusState:
-    if state.get("mode") == "foundry_spec_only":
-        return {**state, "single_change_patch_result": {"status": "blocked", "reason": "Foundry mode is spec-only"}}
-    if not state.get("execute_patch"):
-        return {**state, "single_change_patch_result": {"status": "skipped", "reason": "execute_patch not enabled"}}
-    approvals = state.get("approval_decisions") or {}
-    if state.get("propose_patch") and approvals.get("patch") is not True:
-        return {**state, "single_change_patch_result": {"status": "approval_required", "reason": "patch proposal requires explicit patch approval"}}
-    preflight = _self_patch_preflight(state)
-    if preflight is not None:
-        return {**state, "single_change_patch_result": preflight}
-    request = state.get("patch_request") or {}
-    required = ["file_path", "old_string", "new_string"]
-    missing = [key for key in required if key not in request]
-    if missing:
-        return {**state, "single_change_patch_result": {"status": "blocked", "reason": f"missing patch_request keys: {', '.join(missing)}"}}
-    result = apply_single_change_patch(
-        file_path=str(request["file_path"]),
-        old_string=str(request["old_string"]),
-        new_string=str(request["new_string"]),
-        description=str(request.get("description", "")),
-        allowed_root=_patch_allowed_root(state),
-    )
-    if result.get("status") == "pass" and state.get("self_patch"):
-        # Self-patch lane: mandatory full-suite verification at apply time.
-        # The patch only stands if the whole package still passes; otherwise
-        # it is reverted immediately and reported as verification_failed.
-        verify = _run_self_patch_full_verify()
-        if verify.get("status") != "pass":
-            backup_path = result.get("backup_path")
-            if backup_path:
-                restore_backup_patch(
-                    str(result["file_path"]),
-                    str(backup_path),
-                    "auto-revert after self-patch verification failure",
-                    allowed_root=_patch_allowed_root(state),
-                )
-            result = {
-                "status": "verification_failed",
-                "reason": "self-patch full-suite verification failed; patch reverted",
-                "file_path": str(result.get("file_path")),
-                "verification": verify,
-            }
-        else:
-            result = {**result, "self_patch_verified": True, "verification": {"status": "pass"}}
-    updates: MobiusState = {**state, "single_change_patch_result": result}
-    if result.get("status") == "pass":
-        updates["side_effects_performed"] = _record_side_effect(state, "single_change_patch")
-    return updates
-
-
-def apply_approved_change_set(state: MobiusState) -> MobiusState:
-    if state.get("mode") == "foundry_spec_only":
-        return {**state, "atomic_change_set_result": {"status": "blocked", "reason": "Foundry mode is spec-only"}}
-    if not state.get("execute_change_set"):
-        return {**state, "atomic_change_set_result": {"status": "skipped", "reason": "execute_change_set not enabled"}}
-    approvals = state.get("approval_decisions") or {}
-    if approvals.get("change_set") is not True:
-        return {**state, "atomic_change_set_result": {"status": "approval_required", "reason": "atomic change set requires explicit change_set approval"}}
-    preflight = _self_patch_preflight(state)
-    if preflight is not None:
-        return {**state, "atomic_change_set_result": preflight}
-    request = state.get("change_set_request") or {}
-    changes = request.get("changes") or []
-    result = apply_atomic_change_set(changes, str(request.get("description", "")), allowed_root=_patch_allowed_root(state))
-    if result.get("status") == "pass" and state.get("self_patch"):
-        # Self-patch lane: mandatory full-suite verification at apply time.
-        verify = _run_self_patch_full_verify()
-        if verify.get("status") != "pass":
-            for backup in result.get("backups", []):
-                restore_backup_patch(
-                    str(backup["file_path"]),
-                    str(backup["backup_path"]),
-                    "auto-revert after self-patch verification failure",
-                    allowed_root=_patch_allowed_root(state),
-                )
-            result = {
-                "status": "verification_failed",
-                "reason": "self-patch full-suite verification failed; change set reverted",
-                "verification": verify,
-                "backups": result.get("backups", []),
-            }
-        else:
-            result = {**result, "self_patch_verified": True, "verification": {"status": "pass"}}
-    updates: MobiusState = {**state, "atomic_change_set_result": result}
-    if result.get("status") == "pass":
-        updates["side_effects_performed"] = _record_side_effect(state, "atomic_change_set")
-    return updates
-
-
-def execute_single_change_patch_worker(state: MobiusState) -> MobiusState:
-    if state.get("mode") == "foundry_spec_only":
-        return {**state, "single_change_patch_result": {"status": "blocked", "reason": "Foundry mode is spec-only"}}
-    if state.get("atomic_change_set_result", {}).get("status") in {"pass", "blocked", "approval_required"}:
-        return {**state, "single_change_patch_result": {"status": "skipped", "reason": "atomic change set handled this run"}}
-    if state.get("single_change_patch_result"):
-        return state
-    if not state.get("execute_patch"):
-        return {**state, "single_change_patch_result": {"status": "skipped", "reason": "execute_patch not enabled"}}
-    request = state.get("patch_request") or {}
-    required = ["file_path", "old_string", "new_string"]
-    missing = [key for key in required if key not in request]
-    if missing:
-        return {**state, "single_change_patch_result": {"status": "blocked", "reason": f"missing patch_request keys: {', '.join(missing)}"}}
-    result = apply_single_change_patch(
-        file_path=str(request["file_path"]),
-        old_string=str(request["old_string"]),
-        new_string=str(request["new_string"]),
-        description=str(request.get("description", "")),
-    )
-    updates: MobiusState = {**state, "single_change_patch_result": result}
-    if result.get("status") == "pass":
-        updates["side_effects_performed"] = _record_side_effect(state, "single_change_patch")
-    return updates
-
-
-def evaluate_patch_outcome(patch_result: dict[str, Any], local_worker_result: dict[str, Any], goal_type: str) -> dict[str, Any]:
-    patch_status = patch_result.get("status", "skipped")
-    worker_status = local_worker_result.get("status", "skipped")
-    reasons: list[str] = []
-    score = 100
-
-    if patch_status == "skipped":
-        return {
-            "rubric_version": "mobius.patch_eval.v2.0",
-            "goal_type": goal_type,
-            "score": 100,
-            "recommendation": "no_patch_to_evaluate",
-            "rollback_recommended": False,
-            "reasons": ["No patch was executed."],
-        }
-    if patch_status != "pass":
-        return {
-            "rubric_version": "mobius.patch_eval.v2.0",
-            "goal_type": goal_type,
-            "score": 0,
-            "recommendation": "block_patch",
-            "rollback_recommended": False,
-            "reasons": [f"Patch did not apply cleanly: {patch_result.get('reason', patch_status)}"],
-        }
-
-    if not patch_result.get("backup_path"):
-        score -= 30
-        reasons.append("Patch has no backup path.")
-    if patch_result.get("replacement_count") != 1:
-        score -= 40
-        reasons.append("Patch replacement count was not exactly one.")
-    if patch_result.get("self_patch_verified"):
-        # Self-patch lane: the full suite already ran at apply time and gated
-        # the apply (auto-revert on failure). Treat that as the verifier pass;
-        # do not let the skipped local-worker adapter downgrade it to manual.
-        worker_status = "pass"
-        reasons.append("Self-patch full-suite verification passed at apply time.")
-    elif worker_status == "pass":
-        reasons.append("Verifier passed after patch.")
-    elif worker_status == "skipped":
-        score -= 35
-        reasons.append("Verifier skipped after patch; keep requires manual review.")
-    else:
-        score -= 80
-        reasons.append("Verifier failed after patch; rollback is recommended.")
-
-    rollback = worker_status not in {"pass", "skipped"}
-    if rollback:
-        recommendation = "revert_patch"
-    elif score >= 80 and worker_status == "pass":
-        recommendation = "keep_patch"
-    else:
-        recommendation = "manual_review"
-    return {
-        "rubric_version": "mobius.patch_eval.v2.0",
-        "goal_type": goal_type,
-        "score": max(score, 0),
-        "recommendation": recommendation,
-        "rollback_recommended": rollback,
-        "reasons": reasons,
-        "backup_path": patch_result.get("backup_path"),
-    }
-
-
-def evaluate_patch_and_verifier(state: MobiusState) -> MobiusState:
-    evaluation = evaluate_patch_outcome(
-        state.get("single_change_patch_result", {"status": "skipped"}),
-        state.get("local_worker_result", {"status": "skipped"}),
-        str(state.get("goal_type", "unknown")),
-    )
-    return {**state, "patch_evaluation": evaluation}
-
-
-def _patch_allowed_root(state: MobiusState) -> Path:
-    """Return the patch root in effect for this run.
-
-    Default lane: APP_DIR (.mobius/). Self-patch lane (--self-patch):
-    the package source tree under src/mobius/.
-    """
-    return SELF_PATCH_ROOT if state.get("self_patch") else APP_DIR
-
-
-def _is_inside_patch_root(path: Path, root: Path) -> bool:
-    resolved = path.resolve()
-    root = root.resolve()
-    return resolved == root or root in resolved.parents
-
-
-def _git_worktree_clean() -> bool:
-    """True when the repo working tree has no uncommitted changes.
-
-    Self-patch must start from a clean, revertible baseline so a guarded
-    rollback always restores the exact prior state.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "status", "--short"],
-            text=True, capture_output=True, timeout=30, shell=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and not result.stdout.strip()
-
-
-def _self_patch_preflight(state: MobiusState) -> dict[str, Any] | None:
-    """Return a blocked result when self-patch preconditions are not met."""
-    if not state.get("self_patch"):
-        return None
-    if not state.get("execute_post_rollback_verify"):
-        return {
-            "status": "blocked",
-            "reason": "self-patch requires --execute-post-rollback-verify (mandatory full-suite verification)",
-        }
-    if not state.get("propose_patch"):
-        return {
-            "status": "blocked",
-            "reason": "self-patch requires propose_patch (explicit proposal before any apply)",
-        }
-    approvals = state.get("approval_decisions") or {}
-    if approvals.get("patch") is not True and approvals.get("change_set") is not True:
-        return {
-            "status": "blocked",
-            "reason": "self-patch requires explicit approval (--approve-patch or --approve-change-set)",
-        }
-    if not _git_worktree_clean():
-        return {
-            "status": "blocked",
-            "reason": "self-patch requires a clean git working tree (git status --short must be empty)",
-        }
-    return None
-
-
-def restore_backup_patch(file_path: str, backup_path: str, description: str = "", allowed_root: Path | None = None) -> dict[str, Any]:
-    target = Path(file_path).resolve()
-    backup = Path(backup_path).resolve()
-    root = (allowed_root or APP_DIR).resolve()
-    if not _is_inside_patch_root(target, root) or not _is_inside_patch_root(backup, root):
-        return {"status": "blocked", "reason": "rollback target and backup must be inside the approved patch root", "file_path": str(target), "backup_path": str(backup)}
-    if not target.exists() or not target.is_file():
-        return {"status": "blocked", "reason": "rollback target must be an existing file", "file_path": str(target)}
-    if not backup.exists() or not backup.is_file():
-        return {"status": "blocked", "reason": "rollback backup must be an existing file", "backup_path": str(backup)}
-    target.write_text(backup.read_text())
-    return {
-        "status": "pass",
-        "restored": True,
-        "file_path": str(target),
-        "backup_path": str(backup),
-        "description": description,
-    }
-
-
-def execute_guarded_rollback(state: MobiusState) -> MobiusState:
-    if state.get("mode") == "foundry_spec_only":
-        return {**state, "rollback_result": {"status": "blocked", "reason": "Foundry mode is spec-only"}}
-    evaluation = state.get("patch_evaluation") or {}
-    patch_result = state.get("single_change_patch_result") or {}
-    if not evaluation.get("rollback_recommended"):
-        return {**state, "rollback_result": {"status": "skipped", "reason": "rollback not recommended"}}
-    if not state.get("execute_rollback"):
-        return {**state, "rollback_result": {"status": "approval_required", "reason": "rollback recommended but execute_rollback not enabled"}}
-    backup_path = patch_result.get("backup_path") or evaluation.get("backup_path")
-    file_path = patch_result.get("file_path")
-    if not file_path or not backup_path:
-        return {**state, "rollback_result": {"status": "blocked", "reason": "rollback requires file_path and backup_path"}}
-    result = restore_backup_patch(str(file_path), str(backup_path), "guarded rollback after verifier failure", allowed_root=_patch_allowed_root(state))
-    updates: MobiusState = {**state, "rollback_result": result}
-    if result.get("status") == "pass":
-        updates["side_effects_performed"] = _record_side_effect(state, "guarded_rollback")
-    return updates
-
-
-
 def _build_loop_summary(state: MobiusState) -> dict[str, Any]:
-    evaluation = state.get("patch_evaluation") or {}
-    rollback = state.get("rollback_result") or {}
-    post = state.get("post_rollback_verifier_result") or {}
-    keep = state.get("keep_going_result") or {}
-    final = evaluation.get("recommendation", "no_patch_to_evaluate")
-    change_set = state.get("atomic_change_set_result") or {}
-    if keep.get("status") in {"completed", "stopped", "blocked"}:
-        status = str(keep.get("status"))
-    elif rollback.get("status") == "pass":
-        status = "rolled_back"
-    elif change_set.get("status") == "blocked":
-        status = "blocked"
-    elif change_set.get("status") == "approval_required":
-        status = "needs_review"
-    elif final == "keep_patch":
-        status = "completed"
-    elif final in {"manual_review", "revert_patch"}:
-        status = "needs_review"
-    else:
-        status = "completed" if final == "no_patch_to_evaluate" else "blocked"
+    """Summarize the run. Möbius only writes specs, so nothing is ever executed."""
     return {
-        "version": "1.2",
+        "version": "2.0",
         "bounded": True,
-        "status": status,
-        "final_recommendation": final,
-        "patch_status": (state.get("single_change_patch_result") or {}).get("status"),
-        "atomic_change_set_status": (state.get("atomic_change_set_result") or {}).get("status"),
-        "rollback_status": rollback.get("status"),
-        "post_rollback_status": post.get("status"),
-        "keep_going_status": (state.get("keep_going_result") or {}).get("status"),
-        "keep_going_stop_reason": (state.get("keep_going_result") or {}).get("stop_reason") or (state.get("keep_going_result") or {}).get("reason"),
+        "status": "completed",
+        "final_recommendation": "spec_only",
         "max_iterations": (state.get("budget_policy") or {}).get("max_iterations", 3),
     }
 
-
-def _run_self_patch_full_verify() -> dict[str, Any]:
-    """Mandatory full-suite verification for the self-patch lane.
-
-    Runs the entire pytest suite from the repo root plus a py_compile of the
-    graph module, with a controlled environment (PYTHONPATH=src so the local
-    source tree is importable, like the repo's own test invocation). Commands
-    are fixed constants, not user input, so this mirrors run_doctor's direct
-    subprocess pattern rather than the user-command allowlist.
-    """
-    env = _worker_environment()
-    env["PYTHONPATH"] = str(SELF_PATCH_ROOT.parent)
-    runs: list[dict[str, Any]] = []
-    # Intentionally the full suite, not scoped to the patched file: a self-patch
-    # to shared helpers (graph, foundry, verifier allowlist) can break unrelated
-    # modules, so every self-patch must prove the whole package still passes.
-    commands = [
-        ["python3", "-m", "pytest", "-q"],
-        ["python3", "-m", "py_compile", str(SELF_PATCH_ROOT / "graph.py")],
-    ]
-    for argv in commands:
-        argv[0] = sys.executable
-        try:
-            completed = subprocess.run(
-                argv,
-                cwd=str(REPO_ROOT),
-                env=env,
-                shell=False,
-                text=True,
-                capture_output=True,
-                timeout=300,
-            )
-        except subprocess.TimeoutExpired:
-            return {"status": "fail", "runs": [{"command": " ".join(argv[1:]), "allowed": True, "exit_code": -1, "stdout_tail": "", "stderr_tail": "timeout"}]}
-        runs.append({
-            "command": " ".join(argv[1:]),
-            "allowed": True,
-            "exit_code": completed.returncode,
-            "stdout_tail": completed.stdout[-2000:],
-            "stderr_tail": completed.stderr[-2000:],
-        })
-        if completed.returncode != 0:
-            return {"status": "fail", "runs": runs}
-    return {"status": "pass", "runs": runs}
-
-
-def execute_post_rollback_verifier(state: MobiusState) -> MobiusState:
-    if state.get("mode") == "foundry_spec_only":
-        return {**state, "post_rollback_verifier_result": {"status": "blocked", "reason": "Foundry mode is spec-only"}}
-    rollback = state.get("rollback_result") or {}
-    if rollback.get("status") != "pass":
-        result = {"status": "skipped", "reason": "rollback did not execute successfully"}
-        next_state = {**state, "post_rollback_verifier_result": result}
-        return {**next_state, "loop_summary": _build_loop_summary(next_state)}
-    if not state.get("execute_post_rollback_verify"):
-        result = {"status": "restored_but_unverified", "reason": "post-rollback verifier not enabled"}
-        next_state = {**state, "post_rollback_verifier_result": result}
-        return {**next_state, "loop_summary": _build_loop_summary(next_state)}
-    budget = state.get("budget_policy", {})
-    self_patch = bool(state.get("self_patch"))
-    if self_patch:
-        # Self-patch lane: mandatory full-suite verification (pytest + compile)
-        # from the repo root. A guarded self-patch only stays if the whole
-        # package still passes.
-        worker = _run_self_patch_full_verify()
-    else:
-        commands = state.get("post_rollback_commands") or ["python3 -m py_compile graph.py"]
-        worker = run_local_worker_commands(
-            commands=commands,
-            workdir=APP_DIR,
-            max_commands=int(budget.get("max_worker_runs", 3)),
-            timeout_seconds=min(int(budget.get("max_minutes", 45)) * 60, 300),
-        )
-    status = "restored_and_healthy" if worker.get("status") == "pass" else "restored_but_unhealthy"
-    result = {"status": status, "worker_result": worker}
-    next_state = {**state, "post_rollback_verifier_result": result}
-    if worker.get("runs"):
-        next_state["side_effects_performed"] = _record_side_effect(state, "post_rollback_verifier_commands")
-    return {**next_state, "loop_summary": _build_loop_summary(next_state)}
 
 def write_checkpoint(state: MobiusState) -> MobiusState:
     root = foundry.ensure_artifact_root(DEFAULT_CHECKPOINT_DIR, APP_DIR)
@@ -1882,8 +1329,6 @@ def record_run_history(state: MobiusState) -> MobiusState:
         "rubric_score": (state.get("rubric_score") or {}).get("score"),
         "product_status": (state.get("product_status") or {}).get("status"),
         "loop_status": (state.get("loop_summary") or {}).get("status"),
-        "keep_going_status": (state.get("keep_going_result") or {}).get("status"),
-        "keep_going_stop_reason": (state.get("keep_going_result") or {}).get("stop_reason") or (state.get("keep_going_result") or {}).get("reason"),
         "foundry_completeness": (state.get("foundry_intake") or {}).get("completeness", {}),
         "runtime_recommendation": state.get("runtime_recommendation", {}),
         "readiness": state.get("readiness", {}),
@@ -1904,174 +1349,6 @@ def record_run_history(state: MobiusState) -> MobiusState:
     }
     foundry.append_jsonl_no_follow(history_path, _safe_json_value(entry))
     return {**state, "run_history_path": str(history_path)}
-
-
-SHELL_CONTROL_PATTERN = re.compile(r"[;&|`$<>\n\r]")
-ALLOWED_PYTEST_FLAGS = {
-    "-q",
-    "-v",
-    "-vv",
-    "-x",
-    "--disable-warnings",
-    "--collect-only",
-}
-
-
-def _path_is_within_workdir(value: str, workdir: Path) -> bool:
-    path_part = value.split("::", 1)[0]
-    if not path_part:
-        return False
-    candidate = (workdir / path_part).resolve()
-    return candidate == workdir or workdir in candidate.parents
-
-
-def _parse_allowlisted_command(command: str, workdir: Path | str) -> tuple[list[str] | None, str | None]:
-    """Return validated argv for a narrow verifier command.
-
-    Worker commands are never passed to a shell. The parser also rejects shell
-    control characters and paths that escape the approved work directory.
-    """
-    if not command or SHELL_CONTROL_PATTERN.search(command):
-        return None, "shell control characters are not allowed"
-    try:
-        argv = shlex.split(command)
-    except ValueError as exc:
-        return None, f"invalid command quoting: {exc}"
-    if len(argv) < 3 or argv[:2] != ["python3", "-m"]:
-        return None, "command must start with an approved python3 -m module"
-
-    root = Path(workdir).resolve()
-    module = argv[2]
-    args = argv[3:]
-    if module == "py_compile":
-        if not args:
-            return None, "py_compile requires at least one Python file"
-        for arg in args:
-            if arg.startswith("-") or not arg.endswith(".py") or not _path_is_within_workdir(arg, root):
-                return None, "py_compile accepts only relative .py files inside the approved work directory"
-        return argv, None
-
-    if module == "pytest":
-        for arg in args:
-            if arg in ALLOWED_PYTEST_FLAGS:
-                continue
-            if arg.startswith("--maxfail=") and arg.removeprefix("--maxfail=").isdigit():
-                continue
-            if arg.startswith("--tb=") and arg.removeprefix("--tb=") in {"auto", "long", "short", "line", "native", "no"}:
-                continue
-            if arg.startswith("-"):
-                return None, f"pytest option is not allowlisted: {arg}"
-            if not _path_is_within_workdir(arg, root):
-                return None, "pytest targets must remain inside the approved work directory"
-        return argv, None
-
-    return None, f"python module is not allowlisted: {module}"
-
-
-def _is_command_allowlisted(command: str) -> bool:
-    argv, _ = _parse_allowlisted_command(command, APP_DIR)
-    return argv is not None
-
-
-def _worker_environment() -> dict[str, str]:
-    env = dict(os.environ)
-    for key in ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONINSPECT", "PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
-        env.pop(key, None)
-    env["PYTHONNOUSERSITE"] = "1"
-    return env
-
-
-def run_local_worker_commands(commands: list[str], workdir: Path | str, max_commands: int, timeout_seconds: int, allowed_workdirs: tuple[Path, ...] | None = None) -> dict[str, Any]:
-    workdir_path = Path(workdir).resolve()
-    app_root = APP_DIR.resolve()
-    allowed = tuple(p.resolve() for p in (allowed_workdirs or (app_root,)))
-    if not any(workdir_path == root or root in workdir_path.parents for root in allowed):
-        return {"status": "blocked", "runs": [{"command": "<workdir>", "allowed": False, "reason": "workdir outside approved work roots"}]}
-
-    runs: list[dict[str, Any]] = []
-    for command in commands[:max_commands]:
-        argv, rejection_reason = _parse_allowlisted_command(command, workdir_path)
-        if argv is None:
-            runs.append({"command": command, "allowed": False, "reason": rejection_reason or "command not allowlisted"})
-            return {"status": "blocked", "runs": runs}
-        argv[0] = sys.executable
-        completed = subprocess.run(
-            argv,
-            cwd=str(workdir_path),
-            env=_worker_environment(),
-            shell=False,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-        )
-        runs.append({
-            "command": command,
-            "allowed": True,
-            "exit_code": completed.returncode,
-            "stdout_tail": completed.stdout[-2000:],
-            "stderr_tail": completed.stderr[-2000:],
-        })
-        if completed.returncode != 0:
-            return {"status": "fail", "runs": runs}
-    return {"status": "pass", "runs": runs}
-
-
-def execute_local_worker_adapter(state: MobiusState) -> MobiusState:
-    if state.get("mode") == "foundry_spec_only":
-        return {**state, "local_worker_result": {"status": "blocked", "reason": "Foundry mode is spec-only"}}
-    if state.get("keep_going"):
-        return {**state, "local_worker_result": {"status": "skipped", "reason": "deferred to keep-going loop"}}
-    if not state.get("execute_local"):
-        return {**state, "local_worker_result": {"status": "skipped", "reason": "execute_local not enabled"}}
-    budget = state.get("budget_policy", {})
-    commands = state.get("worker_commands") or ["python3 -m py_compile graph.py"]
-    if state.get("self_patch"):
-        # Self-patch lane: worker commands must be scoped to the source tree
-        # (REPO_ROOT), not APP_DIR, so allowlisted verifiers run where the
-        # patch actually lives.
-        workdir = REPO_ROOT
-        allowed_workdirs = (APP_DIR, REPO_ROOT)
-    else:
-        workdir = APP_DIR
-        allowed_workdirs = None
-    result = run_local_worker_commands(
-        commands=commands,
-        workdir=workdir,
-        max_commands=int(budget.get("max_worker_runs", 3)),
-        timeout_seconds=min(int(budget.get("max_minutes", 45)) * 60, 300),
-        allowed_workdirs=allowed_workdirs,
-    )
-    updates: MobiusState = {**state, "local_worker_result": result}
-    if any(run.get("allowed") is True for run in result.get("runs", [])):
-        updates["side_effects_performed"] = _record_side_effect(state, "local_worker_commands")
-    return updates
-
-
-def run_keep_going_loop(state: MobiusState) -> MobiusState:
-    action, reason = keep_going.should_run(state)
-    if action != "run":
-        status = "skipped" if action == "skip" else "blocked"
-        return {**state, "keep_going_result": {"status": status, "reason": reason, "iteration_count": 0}}
-    workdir = APP_DIR
-
-    def runner(commands: list[str], max_commands: int, timeout_seconds: int) -> dict[str, Any]:
-        return run_local_worker_commands(
-            commands=commands,
-            workdir=workdir,
-            max_commands=max_commands,
-            timeout_seconds=timeout_seconds,
-        )
-
-    result = keep_going.run_loop(state, runner)
-    last_worker = result.get("last_worker_result") or {}
-    updates: MobiusState = {
-        **state,
-        "keep_going_result": result,
-        "local_worker_result": last_worker,
-    }
-    if any(run.get("allowed") is True for run in last_worker.get("runs", [])):
-        updates["side_effects_performed"] = _record_side_effect(state, "keep_going_loop")
-    return updates
 
 
 def quality_review_spec(state: MobiusState) -> MobiusState:
@@ -2103,12 +1380,12 @@ def quality_review_spec(state: MobiusState) -> MobiusState:
         score += 10
     if state.get("patch_evaluation"):
         score += 10
-    if state.get("decision") in {"ready_to_execute", "spec_ready"}:
+    if state.get("decision") in {"spec_ready"}:
         score += 5
     score = min(score, 100)
     # Only a completed spec is eligible for a quality pass. Interview or
     # approval-gate decisions are not evaluated yet.
-    if state.get("decision") in {"ready_to_execute", "spec_ready"}:
+    if state.get("decision") in {"spec_ready"}:
         status = "pass" if score >= 80 else "needs_revision"
     else:
         status = "not_evaluated"
@@ -2183,23 +1460,9 @@ def run_graph(
     objective: str,
     context_hint: str | None = None,
     run_id: str | None = None,
-    execute_local: bool = False,
-    worker_commands: list[str] | None = None,
-    execute_patch: bool = False,
-    patch_request: dict[str, Any] | None = None,
-    execute_rollback: bool = False,
-    execute_post_rollback_verify: bool = False,
-    post_rollback_commands: list[str] | None = None,
-    propose_patch: bool = False,
-    approval_decisions: dict[str, bool] | None = None,
-    bounded_loop: bool = False,
-    keep_going: bool = False,
-    execute_change_set: bool = False,
-    change_set_request: dict[str, Any] | None = None,
     answers: dict[str, Any] | None = None,
     resume_checkpoint: str | None = None,
     foundry_mode: bool | None = None,
-    self_patch: bool = False,
 ) -> MobiusState:
     resume_data: dict[str, Any] = {}
     if resume_checkpoint:
@@ -2224,39 +1487,18 @@ def run_graph(
         "parent_run_id": str(resume_data.get("parent_run_id") or ""),
         "resume_diagnostics": {"ignored_untrusted_fields": resume_data.get("ignored_derived_fields", [])},
         "mode": "foundry_spec_only" if spec_only_foundry else "bounded_control_loop",
-        "execution_authorized": False if spec_only_foundry else bool(execute_local or execute_patch or execute_change_set or keep_going or bounded_loop),
+        # Möbius writes specs and stops; it never runs commands or edits files.
+        "execution_authorized": False,
         "side_effects_performed": [],
-        "local_worker_result": {"status": "skipped", "reason": "Foundry spec-only mode"} if spec_only_foundry else {},
-        "single_change_patch_result": {"status": "skipped", "reason": "Foundry spec-only mode"} if spec_only_foundry else {},
-        "atomic_change_set_result": {"status": "skipped", "reason": "Foundry spec-only mode"} if spec_only_foundry else {},
-        "rollback_result": {"status": "skipped", "reason": "Foundry spec-only mode"} if spec_only_foundry else {},
-        "post_rollback_verifier_result": {"status": "skipped", "reason": "Foundry spec-only mode"} if spec_only_foundry else {},
-        # Agent Foundry is intake/spec-only even if execution flags are
-        # accidentally combined with its CLI invocation.
-        "execute_local": False if spec_only_foundry else execute_local,
-        "worker_commands": [] if spec_only_foundry else (worker_commands or []),
-        "self_patch": False if spec_only_foundry else self_patch,
-        "execute_patch": False if spec_only_foundry else execute_patch,
-        "patch_request": {} if spec_only_foundry else (patch_request or {}),
-        "execute_rollback": False if spec_only_foundry else (execute_rollback or bool((approval_decisions or {}).get("rollback"))),
-        "execute_post_rollback_verify": False if spec_only_foundry else execute_post_rollback_verify,
-        "post_rollback_commands": [] if spec_only_foundry else (post_rollback_commands or []),
-        "propose_patch": False if spec_only_foundry else propose_patch,
-        "approval_decisions": {} if spec_only_foundry else (approval_decisions or {}),
-        "bounded_loop": False if spec_only_foundry else bounded_loop,
-        "keep_going": False if spec_only_foundry else bool(keep_going or bounded_loop),
-        "execute_change_set": False if spec_only_foundry else execute_change_set,
-        "change_set_request": {} if spec_only_foundry else (change_set_request or {}),
     }
     tracker_token, owned_artifacts = foundry.begin_artifact_tracking()
     try:
-        return build_graph(FOUNDRY_NODE_ORDER if spec_only_foundry else GRAPH_NODE_ORDER).invoke(initial)
+        return build_graph(GRAPH_NODE_ORDER).invoke(initial)
     except Exception:
         foundry.cleanup_owned_artifacts(owned_artifacts)
         raise
     finally:
         foundry.end_artifact_tracking(tracker_token)
-
 
 
 def resume_from_checkpoint(checkpoint_path: str) -> MobiusState:
@@ -2292,22 +1534,6 @@ def run_doctor() -> dict[str, Any]:
     wrapper = Path(__file__).resolve().parent / "cli.py"
     wrapper_compile = subprocess.run([sys.executable, "-m", "py_compile", str(wrapper)], text=True, capture_output=True, timeout=60)
     checks["wrapper_callable"] = "pass" if wrapper.exists() and wrapper_compile.returncode == 0 else "fail"
-    app_root = APP_DIR.resolve()
-    if app_root.parent == app_root:
-        checks["app_root_safety"] = "not_applicable"
-    else:
-        outside = app_root.parent / f".mobius-doctor-outside-{_new_run_id()}"
-        safety = apply_single_change_patch(str(outside), "before", "after", "doctor")
-        checks["app_root_safety"] = "pass" if (
-            safety.get("status") == "blocked"
-            and safety.get("reason") == "patch target outside approved patch root"
-            and not outside.exists()
-        ) else "fail"
-    rejected_argv, _ = _parse_allowlisted_command(
-        "python3 -m pytest --version; printf MOBIUS_PREFIX_BYPASS",
-        APP_DIR,
-    )
-    checks["worker_command_safety"] = "pass" if rejected_argv is None else "fail"
     try:
         foundry.ensure_artifact_root(DEFAULT_HISTORY_DIR, APP_DIR)
         checks["artifact_root_safety"] = "pass"

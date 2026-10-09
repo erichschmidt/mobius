@@ -152,7 +152,7 @@ def test_history_contains_final_foundry_fields_and_existing_artifacts_remain(tmp
         answers=COMPLETE_SAFE_ANSWERS,
     )
     history = json.loads(Path(state["run_history_path"]).read_text().splitlines()[-1])
-    assert history["product_version"] == "1.0"
+    assert history["product_version"] == "2.0"
     assert history["report_path"] == state["report_path"]
     assert history["json_spec_path"] == state["json_spec_path"]
     assert history["checkpoint_path"] == state["checkpoint_path"]
@@ -231,62 +231,12 @@ def test_approval_gate_has_scope_digest_and_answers_cannot_self_approve():
     changed_risk = foundry.assess_risk_sources("Build an agent to email customers", None, changed)
     changed_gate = foundry.build_approval_gates(changed_risk, changed, objective="Build an agent to email customers")[0]
     assert changed_gate["scope_digest"] != gate["scope_digest"]
-    with pytest.raises(ValueError, match="unknown Foundry answer keys"):
+    with pytest.raises(ValueError, match="unknown agent-intake answer keys"):
         foundry.validate_answers({**answers, "approval_statuses": {"external_send": "approved"}})
 
 
-def test_foundry_execution_nodes_are_not_invoked_even_with_execution_flags(tmp_path, monkeypatch):
-    isolate_runtime(tmp_path, monkeypatch)
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("execution node was invoked in Foundry spec-only mode")
-
-    for name in mobius.FOUNDRY_EXECUTION_NODES:
-        monkeypatch.setattr(mobius, name, forbidden)
-    state = mobius.run_graph(
-        "Build a weekly agent that creates a local project digest and never sends it",
-        "internal",
-        run_id="spec_only_flags",
-        answers=COMPLETE_SAFE_ANSWERS,
-        execute_local=True,
-        worker_commands=["python3 -m pytest -q"],
-        execute_patch=True,
-        patch_request={"file_path": "/tmp/outside", "old_string": "a", "new_string": "b"},
-        execute_change_set=True,
-        change_set_request={"changes": []},
-        approval_decisions={"patch": True, "change_set": True},
-    )
-    assert state["mode"] == "foundry_spec_only"
-    assert state["decision"] == "spec_ready"
-    assert state["execution_authorized"] is False
-    assert state["side_effects_performed"] == []
-    assert state["local_worker_result"]["status"] == "skipped"
-    assert state["single_change_patch_result"]["status"] == "skipped"
-    assert state["atomic_change_set_result"]["status"] == "skipped"
 
 
-def test_execution_nodes_independently_fail_closed_in_foundry_mode():
-    state = {
-        "mode": "foundry_spec_only",
-        "execute_local": True,
-        "execute_patch": True,
-        "execute_change_set": True,
-        "execute_rollback": True,
-        "execute_post_rollback_verify": True,
-        "propose_patch": True,
-        "approval_decisions": {"patch": True, "change_set": True, "rollback": True},
-    }
-    checks = (
-        (mobius.build_patch_proposal, "patch_proposal"),
-        (mobius.apply_approved_patch, "single_change_patch_result"),
-        (mobius.apply_approved_change_set, "atomic_change_set_result"),
-        (mobius.execute_single_change_patch_worker, "single_change_patch_result"),
-        (mobius.execute_local_worker_adapter, "local_worker_result"),
-        (mobius.execute_guarded_rollback, "rollback_result"),
-        (mobius.execute_post_rollback_verifier, "post_rollback_verifier_result"),
-    )
-    for function, result_key in checks:
-        assert function(state)[result_key]["status"] == "blocked"
 
 
 def test_tampered_checkpoint_recomputes_derived_fields_and_uses_new_run(tmp_path, monkeypatch):

@@ -20,11 +20,10 @@ later, if you want:
 | `foundry.py` | Intake questions, risk, checkpoints | Building or activating an agent |
 | `operator_surface.py` | Short brief, outcome log, learning report | Permission to execute |
 | `reporting.py` | Markdown write-up of a run | A dump of every internal contract |
-| `keep_going.py` | Optional local test retries | Writing new code |
 
 ## Files Möbius writes
 
-All default writes stay under `.mobius/` (or `MOBIUS_APP_DIR` if you set it).
+Every write stays under `.mobius/` (or `MOBIUS_APP_DIR` if you set it).
 
 - `runs/<id>_brief.md` — the short decision surface
 - `runs/<id>_mobius_spec.md` — the full write-up
@@ -35,4 +34,4 @@ All default writes stay under `.mobius/` (or `MOBIUS_APP_DIR` if you set it).
 
 ## Safety
 
-The code enforces the boundary. Prompts only describe intent. Default runs do not use the network, send messages, buy anything, or write to production.
+The code enforces the boundary. Prompts only describe intent. Möbius does not use the network, run commands, send messages, buy anything, or write anywhere outside its artifact folder. There is no flag that turns any of that on.

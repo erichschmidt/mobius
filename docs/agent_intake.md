@@ -64,7 +64,7 @@ A resumed run:
 
 Answer JSON must be a regular file (not a symlink), at most 1 MB. Unknown keys and secret-looking values are rejected before anything is written.
 
-`--foundry` forces intake even if the sentence does not say “agent”. Saying “build an agent” already does that.
+`--agent-intake` forces intake even if the sentence does not say “agent”. Saying “build an agent” already does that. (`--foundry` is an older alias that still works.)
 
 ## Risk
 
@@ -100,9 +100,9 @@ Answers cannot self-approve. Approval state stored in a checkpoint is ignored.
 | `spec_completeness` | Passes only when all twelve questions are resolved. |
 | `safety_readiness` | Blocks on contradictory or unresolved gated authority. |
 | `verification_evidence` | Stays `not_evaluated`. A written plan is not proof a run worked. |
-| `operational_readiness` | Stays `not_evaluated` or `blocked`. v1 builds nothing. |
+| `operational_readiness` | Stays `not_evaluated` or `blocked`. Möbius builds nothing. |
 
-A safe completed intake is `spec_ready`, not `ready_to_execute`. Every Agent Spec has `execution_authorized: false`.
+A safe completed intake is `spec_ready`. Every Agent Spec has `execution_authorized: false`.
 
 ## Runtime recommendation
 
@@ -131,6 +131,6 @@ Intake writes stay under `.mobius/`:
 
 ## Spec-only enforcement
 
-Intake runs omit patch, change-set, local-worker, and rollback steps. Those functions also return `blocked` if called while the run is in spec-only mode.
+Möbius has no patch, change-set, local-worker, or rollback steps at all. They were removed in 2.0.0, so there is nothing to switch on.
 
 An Agent Spec never authorizes a later executor.

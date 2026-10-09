@@ -119,15 +119,15 @@ your sentence → classify + spec + risk + interview if needed → decision → 
 
 ## What Möbius will not do
 
-By default Möbius will not:
+Möbius will not:
 
 - build, deploy, or turn on an agent
 - send mail, post publicly, buy anything, or contact anyone
 - read your mail or other accounts
-- call the network
+- call the network or run commands
 - change files outside `.mobius/`
 
-A few optional flags exist for local test retries and explicit patches. They are off unless you pass them. Read the brief before using any of them.
+There is no flag that turns any of this on. Version 1.0.0 had opt-in execution flags; 2.0.0 removed them.
 
 ---
 
@@ -140,7 +140,7 @@ A few optional flags exist for local test retries and explicit patches. They are
 
 ## Status
 
-**[1.0.0](https://github.com/erichschmidt/mobius/releases/tag/v1.0.0)** — public release. Spec, interview, stop.
+**[2.0.0](https://github.com/erichschmidt/mobius/releases/tag/v2.0.0)** — spec, interview, stop. Nothing else. See the [changelog](CHANGELOG.md) for what changed from 1.0.0.
 
 ---
 
@@ -157,3 +157,7 @@ A few optional flags exist for local test retries and explicit patches. They are
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+Built by [Erich Schmidt](https://erichschmidt.com).

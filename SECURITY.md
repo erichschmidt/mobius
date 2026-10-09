@@ -1,12 +1,13 @@
 # Security Policy
 
-Möbius writes inspectable specs under `.mobius/` and, by default, does not contact third parties, read your mail, or change production systems.
+Möbius writes inspectable specs under `.mobius/`. It does not contact third parties, read your mail, run commands, or change files outside `.mobius/`.
 
 ## Supported versions
 
 | Version | Supported |
 |---------|-----------|
-| 1.0.x   | Yes       |
+| 2.0.x   | Yes       |
+| 1.0.x   | Security fixes only |
 | < 1.0   | No        |
 
 ## Reporting a vulnerability
@@ -30,9 +31,9 @@ Do **not** use Möbius to, without explicit human approval and additional review
 - contact third parties (email, post, trade, purchase);
 - perform offensive security work.
 
-Opt-in execution paths (`--execute-local`, `--keep-going`, `--self-patch`, patch flags) are bounded and allowlisted. Read the flags and brief before approving.
+Version 2.0.0 removed every execution path (local commands, patches, change sets, rollbacks, the keep-going loop, and self-patching). If you find a way to make Möbius run a command or write outside `.mobius/`, that is a vulnerability. Please report it.
 
 ## Scope notes
 
-- Möbius v1 is spec-only by default. Execution flags are explicit and loud.
-- `--self-patch` modifies the package source tree and requires propose, approve, clean git tree, and full test verification.
+- Möbius is spec-only. There are no execution flags.
+- 1.0.x shipped opt-in, allowlisted execution lanes (including `--self-patch`); they are not present in 2.x.
