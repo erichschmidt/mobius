@@ -26,9 +26,10 @@ jobs:
           trap 'rm -rf "$CLEAN"' EXIT
           python -m build --wheel --outdir "$CLEAN/dist"
           WHEEL=$(python - "$CLEAN/dist" <<'PY'
-          import sys
+          import sys, tomllib
           from pathlib import Path
-          wheels = list(Path(sys.argv[1]).glob("mobius-1.0.0-*.whl"))
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          wheels = list(Path(sys.argv[1]).glob(f"mobius-{version}-*.whl"))
           assert len(wheels) == 1, wheels
           print(wheels[0].resolve())
           PY
@@ -40,6 +41,7 @@ jobs:
               assert "mobius/cli.py" in names
               assert "mobius/graph.py" in names
               assert "mobius/foundry.py" in names
+              assert "mobius/keep_going.py" not in names  # execution lanes removed in 2.0.0
               entry_points = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
               assert "mobius = mobius.cli:main" in wheel.read(entry_points).decode()
               metadata = next(name for name in names if name.endswith(".dist-info/METADATA"))
@@ -51,7 +53,10 @@ jobs:
           mkdir "$CLEAN/home"
           HOME="$CLEAN/home" "$CLEAN/venv/bin/mobius" --doctor > doctor.json
           "$CLEAN/venv/bin/python" - <<'PY'
-          import json
+          import json, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
           doctor = json.load(open("doctor.json"))
-          assert doctor["status"] == "pass" and doctor["product_version"] == "1.0"
+          assert doctor["status"] == "pass", doctor
+          assert doctor["product_version"] == ".".join(version.split(".")[:2]), doctor
           PY
