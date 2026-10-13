@@ -8,11 +8,12 @@
 
 Möbius is a command-line tool. You give it a sentence describing an agent you want. It writes a spec, flags risky actions, and asks the questions you still need to answer. Then it **stops**.
 
-It does not generate the agent. It does not send mail, call the internet, or change any of your systems.
+It does not generate the agent. It does not send mail or change any of your systems, and it only goes online if you ask it to with `--assist`.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/erichschmidt/mobius/ci.yml?branch=main&label=CI)](https://github.com/erichschmidt/mobius/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![No runtime dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](pyproject.toml)
 
 ```bash
 pip install -e .    # from this repo; PyPI publish is optional
@@ -62,6 +63,7 @@ You do **not** get a running agent.
 | `.mobius/specs/<id>_mobius_spec.json` | The same spec as JSON |
 | `.mobius/checkpoints/<id>_checkpoint.json` | Saved answers so you can resume |
 | `.mobius/history/runs.jsonl` | One line per run |
+| `.mobius/runs/<id>_suggested_answers.json` | Only with `--assist`: drafted answers for you to edit and pass back |
 
 The terminal prints JSON with `decision`, `risk_level`, `recommended_next_action`, and `brief_path`.
 
@@ -83,7 +85,11 @@ mobius "Build an agent that writes a weekly digest of local project notes"
 
 Saying “build an agent” is enough. Möbius treats that as an agent idea and runs **intake only**: classify the request, score risk, interview, write files, exit.
 
-To finish the intake, answer the twelve questions (goal, trigger, inputs, outputs, tools, memory, cadence, human gate, risk boundary, success criteria, verification plan, registration path) and resume:
+In a terminal, Möbius asks the open questions right there. Press Enter to skip one; skipped questions stay open in the brief. There are thirteen: goal, trigger, inputs, outputs, tools, **capabilities**, memory, cadence, human gate, risk boundary, success criteria, verification plan, and registration path.
+
+**Capabilities** is a checklist, not a guess. You tick what the agent may do (send messages, publish, contact people, move money, handle secrets, change production, delete, write to a system of record, run shell commands, read sensitive data, write local files), or nothing. If your sentence says something the checklist doesn't cover (“…and shares it with the team”), Möbius quotes it back and asks: declare it, or dismiss it. Dismissals are recorded in the brief.
+
+To answer from a file instead (or in scripts, with `--no-input`), write the answers as JSON and resume:
 
 ```bash
 mobius --resume-checkpoint .mobius/checkpoints/<id>_checkpoint.json \
@@ -91,6 +97,23 @@ mobius --resume-checkpoint .mobius/checkpoints/<id>_checkpoint.json \
 ```
 
 [`examples/weekly-digest-answers.json`](examples/weekly-digest-answers.json) is a complete, local-only answer set you can copy.
+
+### Optional: let Claude draft the answers
+
+```bash
+pip install -e '.[assist]'
+export ANTHROPIC_API_KEY=...        # or: ant auth login
+mobius --assist "Build an agent that writes a weekly digest of local project notes"
+```
+
+With `--assist`, Möbius makes one call to Claude (`claude-opus-5-5`; set `MOBIUS_ASSIST_MODEL` to change it). It sends your sentence and answers, never your files. Claude drafts answers for the open questions, flags risky actions, and suggests follow-up questions. The rules:
+
+- **Suggestions are not answers.** Drafts show up as defaults you accept with Enter, or in `<id>_suggested_answers.json` to edit. Until you accept one, that question stays open.
+- **The model can only add caution.** A risky action it flags counts only if it quotes your exact words, and it can never remove a risk Möbius found itself.
+- **No key handling.** Möbius never asks for or stores an API key; the Anthropic SDK reads `ANTHROPIC_API_KEY` or your `ant auth login` profile.
+- **Failures don't stop the run.** If the call fails, Möbius says so and carries on without it.
+
+A run costs a few cents. The spec records the model, request ID, and token usage.
 
 After a run you can record whether the brief helped:
 
@@ -108,7 +131,7 @@ Möbius is a fixed sequence of steps, not a chat. It does not improvise extra ac
 1. Classify the goal (code, writing, research, …) and the setting (`internal`, `client_work`, `public_repo`, …).
 2. Draft a working spec: objective, non-goals, success criteria.
 3. Detect risky actions in your words — send, publish, production writes, credentials — and keep the evidence for each.
-4. If this is an agent idea, run the twelve-question intake. Incomplete answers stay `needs_interview`. Risky requested actions stay `human_approval_required`.
+4. If this is an agent idea, run the thirteen-question intake. Incomplete answers, and risky wording you haven't confirmed or dismissed, stay `needs_interview`. Risky declared actions stay `human_approval_required`.
 5. Write the brief, the spec, and a checkpoint. **Stop.**
 
 ```text
@@ -124,30 +147,31 @@ Möbius will not:
 - build, deploy, or turn on an agent
 - send mail, post publicly, buy anything, or contact anyone
 - read your mail or other accounts
-- call the network or run commands
+- run commands
 - change files outside `.mobius/`
+- call the network, unless you pass `--assist` (one request to the Anthropic API with your sentence and answers)
 
-There is no flag that turns any of this on. Version 1.0.0 had opt-in execution flags; 2.0.0 removed them.
+There is no flag that turns the rest on. Version 1.0.0 had opt-in execution flags; 2.0.0 removed them.
 
 ---
 
 ## Requirements
 
-- Python **3.11+**
-- [LangGraph](https://github.com/langchain-ai/langgraph) ≥ 0.2 (installed automatically)
+- Python **3.11+** on Linux or macOS (Möbius relies on POSIX file APIs for its safe writes)
+- No runtime dependencies. `--assist` needs the optional `anthropic` package: `pip install 'mobius[assist]'`
 
 ---
 
 ## Status
 
-**[2.0.0](https://github.com/erichschmidt/mobius/releases/tag/v2.0.0)** — spec, interview, stop. Nothing else. See the [changelog](CHANGELOG.md) for what changed from 1.0.0.
+**2.1.0** — spec, interview, stop. Now with a capabilities checklist, an interview in the terminal, and an opt-in `--assist`. See the [changelog](CHANGELOG.md).
 
 ---
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [Agent intake](docs/agent_intake.md) — the twelve questions, risk rules, and artifacts
+- [Agent intake](docs/agent_intake.md) — the thirteen questions, risk rules, and artifacts
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)

@@ -14,16 +14,34 @@ from typing import Any
 import json
 import os
 import re
-import stat
 import unicodedata
 import uuid
 import fcntl
 
 FOUNDRY_DIMENSIONS = (
-    "goal", "trigger", "inputs", "outputs", "tools", "memory", "cadence",
+    "goal", "trigger", "inputs", "outputs", "tools", "capabilities", "memory", "cadence",
     "human_gate", "risk_boundary", "success_criteria", "verification_plan",
     "registration_path",
 )
+# Optional answer keys that are not intake dimensions.
+EXTRA_ANSWER_KEYS = ("dismissed_signals",)
+
+# What the agent may do, asked as an explicit checklist instead of guessed from prose.
+CAPABILITY_LABELS: dict[str, str] = {
+    "external_send": "send messages or files to anyone (email, chat, uploads)",
+    "publish": "publish or post anything publicly",
+    "outreach_contact": "contact people (calls, DMs, prospecting)",
+    "purchase_payment_trade": "spend, pay, trade, or move money",
+    "credentials_secrets": "handle credentials, tokens, or other secrets",
+    "production_changes": "deploy or change production systems",
+    "destructive_deletion": "delete or remove data or files",
+    "system_of_record_writes": "write to a CRM, database, ticket system, or other system of record",
+    "shell_commands": "run shell commands or scripts",
+    "sensitive_data_access": "read customer, personal, or other sensitive data",
+    "local_writes": "create or edit local files",
+}
+CAPABILITIES = tuple(CAPABILITY_LABELS)
+NO_CAPABILITIES = "none"
 
 INTERVIEW_QUESTIONS: dict[str, str] = {
     "goal": "What should this agent accomplish in one sentence?",
@@ -31,6 +49,10 @@ INTERVIEW_QUESTIONS: dict[str, str] = {
     "inputs": "What data or systems may it read? Name paths, inboxes, APIs, or records.",
     "outputs": "What must it produce or send (files, emails, posts)? Draft-only or live?",
     "tools": "Which bounded tools or APIs would it need?",
+    "capabilities": (
+        "Which of these may it do? List any of: " + ", ".join(CAPABILITIES)
+        + f" — or \"{NO_CAPABILITIES}\"."
+    ),
     "memory": "What may it remember, where should that live, and for how long?",
     "cadence": "How often should it run (one-shot, daily, weekly, always-on)?",
     "human_gate": "When must a human approve before it acts?",
@@ -71,7 +93,23 @@ def interview_question_for_gate(action: str) -> str:
 
 def interview_questions_for_gates(gates: list[dict[str, Any]]) -> list[str]:
     return [interview_question_for_gate(str(gate.get("action") or "unknown")) for gate in gates]
-LIST_DIMENSIONS = {"inputs", "outputs", "tools", "success_criteria", "verification_plan"}
+
+
+def interview_question_for_signal(signal: dict[str, Any]) -> str:
+    action = str(signal.get("canonical_action") or "unknown")
+    label = CAPABILITY_LABELS.get(action, action)
+    return (
+        f"Your description says \"{signal.get('evidence')}\". Will the agent {label}? "
+        f"If yes, add `{action}` to capabilities; if not, add it to dismissed_signals."
+    )
+
+
+def interview_questions_for_signals(signals: list[dict[str, Any]]) -> list[str]:
+    return [interview_question_for_signal(signal) for signal in signals]
+
+
+LIST_DIMENSIONS = {"inputs", "outputs", "tools", "capabilities", "success_criteria", "verification_plan"}
+VOCABULARY_KEYS = {"capabilities", "dismissed_signals"}
 READINESS_DIMENSIONS = (
     "spec_completeness", "safety_readiness", "verification_evidence", "operational_readiness",
 )
@@ -88,21 +126,24 @@ MAX_JSON_DEPTH = 12
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 
 ACTION_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("external_send", r"\b(?:send(?:ing|s)?|email(?:ing|s|ed)?|message(?:s|d|ing)?|deliver(?:ing|ed|s)?|upload(?:ing|ed|s)?)\b"),
+    ("external_send", r"\b(?:send(?:ing|s)?|email(?:ing|s|ed)?|message(?:s|d|ing)?|deliver(?:ing|ed|s)?|upload(?:ing|ed|s)?|shar(?:e|es|ed|ing)|forward(?:s|ed|ing)?)\b"),
     ("publish", r"\b(?:publish(?:ing|ed|es)?|post(?:ing|ed|s)?|make public|publicly release)\b"),
     ("outreach_contact", r"\b(?:outreach|contact(?:ing|ed|s)?|call(?:ing|ed|s)?|prospect(?:ing|ed|s)?|dm(?:ing|s|ed)?)\b"),
-    ("purchase_payment_trade", r"\b(?:purchase(?:s|d|ing)?|buy(?:ing|s)?|pay(?:ment|ments|ing|s|ed)?|trade(?:s|d|ing)?|charge(?:s|d|ing)?|transfer(?:s|red|ring)?)\b"),
+    ("purchase_payment_trade", r"\b(?:purchase(?:s|d|ing)?|buy(?:ing|s)?|pay(?:ment|ments|ing|s|ed)?|trade(?:s|d|ing)?|charge(?:s|d|ing)?|transfer(?:s|red|ring)?|refund(?:s|ed|ing)?|wir(?:e|es|ed|ing)\s+(?:the\s+)?(?:money|funds|cash|payments?|transfers?))\b"),
     ("credentials_secrets", r"\b(?:credential(?:s)?|secret(?:s)?|token(?:s)?|api[ _-]?key(?:s)?|password(?:s)?|private key)\b"),
     ("production_changes", r"\b(?:production|prod\b|deploy(?:ment|ing|ed|s)?|release(?:s|d|ing)?|live system|rotate credentials)\b"),
-    ("destructive_deletion", r"\b(?:delete(?:s|d|ing)?|remove(?:s|d|ing)?|destroy(?:s|ed|ing)?|drop(?:s|ped|ping)?|purge(?:s|d|ing)?|truncate(?:s|d|ing)?)\b"),
+    ("destructive_deletion", r"\b(?:delete(?:s|d|ing)?|remove(?:s|d|ing)?|destroy(?:s|ed|ing)?|drop(?:s|ped|ping)?|purge(?:s|d|ing)?|truncate(?:s|d|ing)?|rm\s+-r\w*)\b"),
     ("system_of_record_writes", r"\b(?:writ(?:e|es|ing|ten)|updat(?:e|es|ed|ing)|edit(?:s|ed|ing)?|chang(?:e|es|ed|ing)|modif(?:y|ies|ied|ying)|mutat(?:e|es|ed|ing)|creat(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|sync(?:s|ed|ing)?|push(?:es|ed|ing)?|add(?:s|ed|ing)?|log(?:s|ged|ging)?|set(?:s|ting)?|assign(?:s|ed|ing)?|merg(?:e|es|ed|ing)|import(?:s|ed|ing)?)\b[^.;\n]{0,55}\b(?:hubspot|crm|erp|database|tickets?|customer\s+records?|system\s+of\s+record|source\s+of\s+truth)\b|\b(?:hubspot|crm|erp|database|tickets?|customer\s+records?|system\s+of\s+record|source\s+of\s+truth)\b[^.;\n]{0,55}\b(?:writ(?:e|es|ing|ten)|updat(?:e|es|ed|ing)|edit(?:s|ed|ing)?|chang(?:e|es|ed|ing)|modif(?:y|ies|ied|ying)|mutat(?:e|es|ed|ing)|creat(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|sync(?:s|ed|ing)?|push(?:es|ed|ing)?|add(?:s|ed|ing)?|log(?:s|ged|ging)?|set(?:s|ting)?|assign(?:s|ed|ing)?|merg(?:e|es|ed|ing)|import(?:s|ed|ing)?)\b"),
+    ("shell_commands", r"\b(?:shell|bash|zsh|powershell|sudo|ssh(?:es|ed|ing)?|rm\s+-r\w*)\b|\b(?:run(?:s|ning)?|execut(?:e|es|ed|ing)|invok(?:e|es|ed|ing))\s+(?:(?:arbitrary|local|shell|system|terminal|the|a|any|some)\s+){0,3}(?:commands?|scripts?|programs?|binaries)\b"),
     ("local_writes", r"\b(?:write(?:s|written|writing)?|save(?:s|d|ing)?|create(?:s|d|ing)?|edit(?:s|ed|ing)?|update(?:s|d|ing)?)\b[^.;\n]{0,40}\b(?:local|file(?:s)?|markdown|json|project folder|disk)\b|\b(?:local|file(?:s)?|markdown|json)\b[^.;\n]{0,30}\b(?:write|save|create|edit|update)\b"),
 )
 HIGH_RISK_ACTIONS = {
     "external_send", "publish", "outreach_contact", "purchase_payment_trade",
     "credentials_secrets", "production_changes", "destructive_deletion",
-    "system_of_record_writes",
+    "system_of_record_writes", "shell_commands",
 }
+# Actions that always need a person's sign-off before an implementation may do them.
+GATED_ACTIONS = HIGH_RISK_ACTIONS | {"sensitive_data_access"}
 PROHIBITED_RE = re.compile(
     r"(?:must\s+not|do(?:es)?\s+not|don['’]t|never|forbid(?:den)?|prohibit(?:ed)?|disallow(?:ed)?|not\s+(?:allowed|permitted)\s+to|no\s+(?:external\s+)?(?:action|send|sending|email|post|publish|purchase|contact|credential|production|delete|write))",
     re.IGNORECASE,
@@ -119,7 +160,7 @@ POST_PROHIBITED_RE = re.compile(
     re.IGNORECASE,
 )
 APPROVAL_RE = re.compile(
-    r"(?:ask\s+(?:me\s+)?before|approval\s+(?:is\s+)?required|require(?:s|d)?\s+(?:human\s+)?approval|only\s+after\s+(?:(?:i|human|legal|manager)\s+)?(?:approv(?:al|e)|sign[- ]?off)|subject\s+to\s+approval|with\s+explicit\s+approval|human[- ]gated|before\s+each\s+send|without\s+(?:human\s+|my\s+|explicit\s+)?approval|unless\s+(?:human\s+|explicitly\s+)?approved|approved\s+by\s+(?:a\s+)?(?:human|manager|owner))",
+    r"(?:ask\s+(?:me\s+)?before|approval\s+(?:is\s+)?required|require(?:s|d)?\s+(?:human\s+)?approval|only\s+after\s+(?:(?:i|human|legal|manager)\s+)?(?:approv(?:al|e)|sign[- ]?off)|subject\s+to\s+approval|with\s+explicit\s+approval|human[- ]gated|before\s+each\s+send|(?:after|once|when)\s+(?:i|we|a\s+human|someone|my\s+manager|the\s+owner)\s+(?:approves?|signs?\s+off|confirms?)|after\s+(?:human\s+|explicit\s+)?(?:approval|sign[- ]?off)|without\s+(?:human\s+|my\s+|explicit\s+)?approval|unless\s+(?:human\s+|explicitly\s+)?approved|approved\s+by\s+(?:a\s+)?(?:human|manager|owner))",
     re.IGNORECASE,
 )
 MENTION_RE = re.compile(
@@ -155,6 +196,17 @@ _ARTIFACT_TRACKER: ContextVar[list[OwnedArtifact] | None] = ContextVar(
 
 def is_agent_request(objective: str) -> bool:
     return bool(AGENT_CREATION_RE.search(objective or ""))
+
+
+def agent_task_text(objective: str) -> str:
+    """The part of an agent request that says what the agent does.
+
+    "Build an agent that writes a weekly digest" -> " that writes a weekly digest".
+    Objectives that are not agent requests come back unchanged.
+    """
+    text = objective or ""
+    match = AGENT_CREATION_RE.search(text)
+    return text[match.end():] if match and text[match.end():].strip() else text
 
 
 def begin_artifact_tracking() -> tuple[Token, list[OwnedArtifact]]:
@@ -255,14 +307,16 @@ def validate_answers(payload: dict[str, Any] | None) -> dict[str, Any]:
         nested = dict(nested)
         nested.update(raw)
         raw = nested
-    unknown = sorted(set(raw) - set(FOUNDRY_DIMENSIONS))
+    unknown = sorted(set(raw) - set(FOUNDRY_DIMENSIONS) - set(EXTRA_ANSWER_KEYS))
     if unknown:
         raise ValueError(f"unknown agent-intake answer keys: {', '.join(unknown)}")
     _json_depth(raw)
     reject_secret_values(raw)
     clean: dict[str, Any] = {}
     for name, value in raw.items():
-        if name in LIST_DIMENSIONS:
+        if name in VOCABULARY_KEYS:
+            clean[name] = _validate_vocabulary(name, value)
+        elif name in LIST_DIMENSIONS:
             if isinstance(value, str):
                 value = [value]
             if not isinstance(value, list) or len(value) > MAX_LIST_ITEMS or not all(isinstance(item, str) for item in value):
@@ -278,7 +332,25 @@ def validate_answers(payload: dict[str, Any] | None) -> dict[str, Any]:
             if len(value) > MAX_TEXT_CHARS:
                 raise ValueError(f"{name} exceeds {MAX_TEXT_CHARS} characters")
             clean[name] = value
+    overlap = set(clean.get("capabilities") or []) & set(clean.get("dismissed_signals") or [])
+    if overlap:
+        raise ValueError(f"cannot both declare and dismiss: {', '.join(sorted(overlap))}")
     return clean
+
+
+def _validate_vocabulary(name: str, value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [part for part in re.split(r"[\s,]+", value) if part]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must be a list of names")
+    items = list(dict.fromkeys(item.strip().lower() for item in value if item.strip()))
+    allowed = set(CAPABILITIES) | ({NO_CAPABILITIES} if name == "capabilities" else set())
+    unknown = sorted(set(items) - allowed)
+    if unknown:
+        raise ValueError(f"unknown {name}: {', '.join(unknown)}; choose from {', '.join(CAPABILITIES)}")
+    if NO_CAPABILITIES in items and len(items) > 1:
+        raise ValueError(f'"{NO_CAPABILITIES}" cannot be combined with other capabilities')
+    return items
 
 
 def normalize_answers(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -368,37 +440,91 @@ def _classification(text: str, start: int, end: int) -> tuple[str, bool]:
     return "requested", ambiguous
 
 
-def assess_risk_sources(objective: str, context: str | None, answers: dict[str, Any] | None) -> dict[str, Any]:
+def _occurrence(action: str, classification: str, source_field: str, evidence: str, ambiguous: bool) -> dict[str, Any]:
+    return {
+        "canonical_action": action,
+        "classification": classification,
+        "source_field": source_field,
+        "evidence": evidence,
+        "ambiguous": ambiguous,
+        # compatibility aliases for older readers
+        "action": action,
+        "disposition": classification,
+    }
+
+
+def assess_risk_sources(
+    objective: str,
+    context: str | None,
+    answers: dict[str, Any] | None,
+    model_findings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Score risk from what the person wrote and what they declared.
+
+    Wording is scanned for risky actions, but once ``capabilities`` is
+    answered, the declaration is the authority: any risky wording it does not
+    cover becomes a question (``unconfirmed_signals``) until the person either
+    declares that capability or lists it in ``dismissed_signals``. Model
+    findings (``--assist``) are treated like wording: they are kept only when
+    their evidence is a verbatim quote, and they can only add risk.
+    """
     normalized = validate_answers(answers)
     sources: list[tuple[str, str]] = [("objective", objective or "")]
     if context:
         sources.append(("context", context))
-    sources.extend((f"answers.{name}", _field_text(value)) for name, value in normalized.items())
+    sources.extend(
+        (f"answers.{name}", _field_text(value))
+        for name, value in normalized.items()
+        if name not in VOCABULARY_KEYS
+    )
     occurrences: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
+
+    def add(item: dict[str, Any]) -> None:
+        key = (item["canonical_action"], item["classification"], item["source_field"], item["evidence"].casefold())
+        if key not in seen:
+            seen.add(key)
+            occurrences.append(item)
+
     for source_field, text in sources:
         for action, pattern in ACTION_PATTERNS:
             for match in re.finditer(pattern, text, re.IGNORECASE):
                 classification, ambiguous = _classification(text, match.start(), match.end())
-                evidence = _excerpt(text, match.start(), match.end())
-                key = (action, classification, source_field, evidence.casefold())
-                if key in seen:
-                    continue
-                seen.add(key)
-                occurrences.append({
-                    "canonical_action": action,
-                    "classification": classification,
-                    "source_field": source_field,
-                    "evidence": evidence,
-                    "ambiguous": ambiguous,
-                    # compatibility aliases for older readers
-                    "action": action,
-                    "disposition": classification,
-                })
+                add(_occurrence(action, classification, source_field, _excerpt(text, match.start(), match.end()), ambiguous))
+
+    all_source_text = "\n".join(text for _, text in sources)
+    for finding in model_findings or []:
+        action = str(finding.get("action") or "")
+        evidence = " ".join(str(finding.get("evidence") or "").split())
+        if action in CAPABILITIES and evidence and evidence.casefold() in " ".join(all_source_text.split()).casefold():
+            add(_occurrence(action, "requested", "model", evidence, False))
+
+    declared_list = normalized.get("capabilities")
+    declared = None if declared_list is None else set(declared_list) - {NO_CAPABILITIES}
+    dismissed = set(normalized.get("dismissed_signals") or []) if declared is not None else set()
+    for action in sorted(declared or ()):
+        add(_occurrence(action, "requested", "answers.capabilities", f"Declared capability: {action}", False))
+
+    unconfirmed: list[dict[str, Any]] = []
+    dismissed_items: list[dict[str, Any]] = []
+    if declared is not None:
+        for item in occurrences:
+            action = item["canonical_action"]
+            if item["source_field"] == "answers.capabilities" or action in declared:
+                continue
+            if item["classification"] not in {"requested", "approval_gated"}:
+                continue
+            if action in dismissed:
+                item["dismissed"] = True
+                dismissed_items.append(item)
+            else:
+                unconfirmed.append(item)
+
+    live = [item for item in occurrences if not item.get("dismissed")]
     effective: dict[str, dict[str, Any]] = {}
     contradictions: list[dict[str, Any]] = []
-    for action, _ in ACTION_PATTERNS:
-        items = [item for item in occurrences if item["canonical_action"] == action]
+    for action in CAPABILITIES:
+        items = [item for item in live if item["canonical_action"] == action]
         if not items:
             continue
         classes = {item["classification"] for item in items}
@@ -423,7 +549,7 @@ def assess_risk_sources(objective: str, context: str | None, answers: dict[str, 
         level = "medium"
     else:
         level = "low"
-    all_text = "\n".join(text for _, text in sources).lower()
+    all_text = all_source_text.lower()
     exposure: list[str] = []
     if re.search(r"\b(?:pii|personal\s+data|customer\s+(?:data|records?|information)|client\s+(?:data|records?|information)|crm\s+(?:data|records?|export))\b", all_text):
         exposure.append("customer_data")
@@ -434,14 +560,17 @@ def assess_risk_sources(objective: str, context: str | None, answers: dict[str, 
     if level == "low" and "customer_data" in exposure:
         level = "medium"
     return {
-        "version": "mobius.risk_assessment.v1.0",
+        "version": "mobius.risk_assessment.v1.1",
         "level": level,
         "actions": occurrences,
         "effective_authority": effective,
         "contradictions": contradictions,
         "requested_authority": requested_authority,
+        "declared_capabilities": None if declared_list is None else list(declared_list),
+        "unconfirmed_signals": unconfirmed,
+        "dismissed_signals": dismissed_items,
         "data_exposure": exposure,
-        "basis": "Risk is recomputed from objective, context, and all validated answer fields with source provenance. Prohibitions do not lower affirmative authority; contradictions block.",
+        "basis": "Risk is recomputed from objective, context, and all validated answer fields with source provenance. Declared capabilities are authoritative; undeclared risky wording must be confirmed or dismissed. Prohibitions do not lower affirmative authority; contradictions block.",
     }
 
 
@@ -454,8 +583,19 @@ def _answer_status(value: Any) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
 
-def build_intake(objective: str, context: str | None, answers: dict[str, Any] | None) -> dict[str, Any]:
+def build_intake(
+    objective: str,
+    context: str | None,
+    answers: dict[str, Any] | None,
+    suggestions: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve each intake dimension as answered, inferred, suggested, or missing.
+
+    ``suggested`` (a model draft from ``--assist``) still counts as missing:
+    only the person's own answers resolve a dimension.
+    """
     normalized = validate_answers(answers)
+    suggestions = suggestions or {}
     dimensions: dict[str, dict[str, Any]] = {}
     inferred: dict[str, Any] = {"goal": objective.strip()} if objective.strip() else {}
     cadence = re.search(r"\b(daily|weekly|monthly|hourly|one[- ]shot|manual|event[- ]driven)\b", objective, re.IGNORECASE)
@@ -470,9 +610,11 @@ def build_intake(objective: str, context: str | None, answers: dict[str, Any] | 
             dimensions[name] = {"status": "answered", "value": normalized[name], "source": f"answers.{name}"}
         elif _answer_status(inferred.get(name)):
             dimensions[name] = {"status": "inferred", "value": inferred[name], "source": "objective"}
+        elif _answer_status(suggestions.get(name)):
+            dimensions[name] = {"status": "suggested", "value": None, "suggested_value": suggestions[name], "source": "model"}
         else:
             dimensions[name] = {"status": "missing", "value": None, "source": None}
-    missing = [name for name, item in dimensions.items() if item["status"] == "missing"]
+    missing = [name for name, item in dimensions.items() if item["status"] in {"missing", "suggested"}]
     return {
         "version": "mobius.foundry_intake.v1.0",
         "objective": objective,
@@ -483,6 +625,7 @@ def build_intake(objective: str, context: str | None, answers: dict[str, Any] | 
             "complete": not missing,
             "answered": [name for name, item in dimensions.items() if item["status"] == "answered"],
             "inferred": [name for name, item in dimensions.items() if item["status"] == "inferred"],
+            "suggested": [name for name, item in dimensions.items() if item["status"] == "suggested"],
             "missing": missing,
             "resolved_count": len(FOUNDRY_DIMENSIONS) - len(missing),
             "total_count": len(FOUNDRY_DIMENSIONS),
@@ -502,7 +645,7 @@ def _scope_digest(scope: dict[str, Any]) -> str:
 def build_approval_gates(risk: dict[str, Any], answers: dict[str, Any] | None, *, objective: str = "", revision: int = 1) -> list[dict[str, Any]]:
     normalized = validate_answers(answers)
     effective = risk.get("effective_authority") or {}
-    gated_actions = sorted(action for action, item in effective.items() if action in HIGH_RISK_ACTIONS and item.get("authority") in {"requested", "approval_gated", "blocked_conflict"})
+    gated_actions = sorted(action for action, item in effective.items() if action in GATED_ACTIONS and item.get("authority") in {"requested", "approval_gated", "blocked_conflict"})
     if "customer_data" in risk.get("data_exposure", []) and "sensitive_data_access" not in gated_actions:
         gated_actions.append("sensitive_data_access")
         gated_actions.sort()
@@ -531,6 +674,8 @@ def select_runtime(intake: dict[str, Any], risk: dict[str, Any], gates: list[dic
     blocked = bool(risk.get("contradictions")) or any(gate["status"] != "approved" for gate in gates)
     if not intake.get("completeness", {}).get("complete"):
         selected, reasons = "do_not_build_agent", ["Intake is incomplete; resolve required dimensions first."]
+    elif risk.get("unconfirmed_signals"):
+        selected, reasons = "do_not_build_agent", ["Risky wording is not yet confirmed or dismissed."]
     elif blocked:
         selected, reasons = "do_not_build_agent", ["Safety or approval state blocks implementation; preserve this as a review-only specification."]
     elif "mcp" in text:
@@ -549,9 +694,18 @@ def select_runtime(intake: dict[str, Any], risk: dict[str, Any], gates: list[dic
 def evaluate_readiness(intake: dict[str, Any], risk: dict[str, Any], gates: list[dict[str, Any]], runtime: dict[str, Any], answers: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     complete = bool(intake.get("completeness", {}).get("complete"))
     unresolved = bool(risk.get("contradictions")) or any(gate["status"] in {"pending", "edited", "rejected", "expired"} for gate in gates)
+    unconfirmed = bool(risk.get("unconfirmed_signals"))
+    if unresolved:
+        safety = {"status": "blocked", "reason": "Contradictory authority or approval gates are unresolved."}
+    elif unconfirmed:
+        safety = {"status": "not_evaluated", "reason": "Risky wording is not yet confirmed or dismissed."}
+    elif complete:
+        safety = {"status": "pass", "reason": "Risk boundaries contain no unresolved high-risk authority."}
+    else:
+        safety = {"status": "not_evaluated", "reason": "Safety cannot be finalized until intake is complete."}
     readiness = {
-        "spec_completeness": {"status": "pass" if complete else "fail", "reason": "All twelve intake dimensions are resolved." if complete else "Required intake dimensions remain missing."},
-        "safety_readiness": {"status": "blocked" if unresolved else ("pass" if complete else "not_evaluated"), "reason": "Contradictory authority or approval gates are unresolved." if unresolved else ("Risk boundaries contain no unresolved high-risk authority." if complete else "Safety cannot be finalized until intake is complete.")},
+        "spec_completeness": {"status": "pass" if complete else "fail", "reason": "All intake dimensions are resolved." if complete else "Required intake dimensions remain missing."},
+        "safety_readiness": safety,
         "verification_evidence": {"status": "not_evaluated", "reason": "A written verification plan is not execution evidence; v1 does not build or test the proposed agent."},
         "operational_readiness": {"status": "blocked" if unresolved else "not_evaluated", "reason": "Möbius v1 is spec-only; operational readiness requires a separate approved build and evidence-producing test phase."},
     }
@@ -672,205 +826,6 @@ def atomic_write_new(path: Path, content: str) -> None:
         os.close(dir_fd)
 
 
-PAIR_PUBLICATION_CHECKS = {
-    "first_prepared_reopened_exact_bytes": True,
-    "second_prepared_reopened_exact_bytes": True,
-    "pinned_parent_identity_verified_before_links": True,
-    "both_entries_linked_through_pinned_parent": True,
-    "pinned_parent_identity_verified_after_links": True,
-    "both_published_entries_verified_as_owned_inodes": True,
-    "pinned_parent_fsynced": True,
-}
-
-
-def capture_directory_identity(directory: Path) -> tuple[int, int]:
-    """Capture a real directory's device/inode identity without following its final component."""
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(directory, flags)
-    except OSError as exc:
-        raise ValueError(f"cannot safely pin directory identity: {directory}") from exc
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISDIR(info.st_mode):
-            raise ValueError(f"expected a real directory: {directory}")
-        return info.st_dev, info.st_ino
-    finally:
-        os.close(fd)
-
-
-def capture_contained_directory_identities(
-    directory: Path, app_root: Path,
-) -> tuple[tuple[int, int], tuple[int, int]]:
-    """Pin ``app_root`` and traverse to ``directory`` without following descendants."""
-    root = directory.absolute()
-    app = app_root.absolute()
-    if root != app and app not in root.parents:
-        raise ValueError("artifact directory escapes Mobius app root")
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        app_fd = os.open(app, flags)
-    except OSError as exc:
-        raise ValueError(f"cannot safely pin app root: {app}") from exc
-    current_fd = os.dup(app_fd)
-    try:
-        app_info = os.fstat(app_fd)
-        for component in root.relative_to(app).parts:
-            try:
-                next_fd = os.open(component, flags, dir_fd=current_fd)
-            except OSError as exc:
-                raise ValueError("artifact path contains a symlink or non-directory component") from exc
-            os.close(current_fd)
-            current_fd = next_fd
-        root_info = os.fstat(current_fd)
-        return (app_info.st_dev, app_info.st_ino), (root_info.st_dev, root_info.st_ino)
-    finally:
-        os.close(current_fd)
-        os.close(app_fd)
-
-
-def publish_artifact_pair(
-    directory: Path,
-    first_name: str,
-    first_content: str,
-    second_name: str,
-    second_content: str,
-    *,
-    expected_app_root: Path | None = None,
-    expected_app_root_identity: tuple[int, int] | None = None,
-    expected_directory_identity: tuple[int, int] | None = None,
-) -> dict[str, bool]:
-    """Transactionally publish two exact byte snapshots in one pinned directory.
-
-    The pathname must resolve to the directory pinned at entry immediately before
-    linking and again after both links. Prepared files are reopened through the
-    held descriptor and byte-compared before publication. On every publication
-    error, rollback examines and removes only entries owned by this call through
-    that same descriptor, even if the original pathname was renamed or replaced.
-    """
-    names = (first_name, second_name)
-    if any(name in {"", ".", ".."} or Path(name).name != name for name in names) or first_name == second_name:
-        raise ValueError("artifact names must be distinct non-empty basenames")
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
-    dir_fd = os.open(directory, flags)
-    pinned = os.fstat(dir_fd)
-    pinned_identity = (pinned.st_dev, pinned.st_ino)
-    temp_names: list[str] = []
-    owned: list[tuple[str, int, int]] = []
-
-    if expected_directory_identity is not None and pinned_identity != expected_directory_identity:
-        os.close(dir_fd)
-        raise OSError("artifact directory identity changed before publication")
-    if (expected_app_root is None) != (expected_app_root_identity is None):
-        os.close(dir_fd)
-        raise ValueError("expected app-root path and identity must be supplied together")
-
-    def require_identity(path: Path, expected: tuple[int, int], label: str) -> None:
-        pathname_fd: int | None = None
-        try:
-            pathname_fd = os.open(path, flags)
-            current = os.fstat(pathname_fd)
-        except OSError as exc:
-            raise OSError(f"{label} pathname identity check failed") from exc
-        finally:
-            if pathname_fd is not None:
-                os.close(pathname_fd)
-        if (current.st_dev, current.st_ino) != expected:
-            raise OSError(f"{label} pathname identity changed")
-
-    def require_pathname_identities() -> None:
-        if expected_app_root is not None and expected_app_root_identity is not None:
-            current_app, current_directory = capture_contained_directory_identities(
-                directory, expected_app_root,
-            )
-            if current_app != expected_app_root_identity:
-                raise OSError("app root pathname identity changed")
-            if current_directory != pinned_identity:
-                raise OSError("artifact directory pathname identity changed")
-            return
-        require_identity(directory, pinned_identity, "artifact directory")
-
-    def reopen_exact(temp_name: str, expected: bytes) -> tuple[int, int]:
-        fd = os.open(temp_name, os.O_RDONLY | nofollow, dir_fd=dir_fd)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise ValueError("prepared artifact is not a regular file")
-            chunks: list[bytes] = []
-            while True:
-                chunk = os.read(fd, 65_536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            if b"".join(chunks) != expected:
-                raise ValueError("prepared artifact bytes changed before publication")
-            return info.st_dev, info.st_ino
-        finally:
-            os.close(fd)
-
-    try:
-        require_pathname_identities()
-        for name in names:
-            try:
-                os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            raise FileExistsError(f"refusing to overwrite existing artifact: {directory / name}")
-
-        prepared: list[tuple[str, str, int, int]] = []
-        for name, content in ((first_name, first_content), (second_name, second_content)):
-            expected = content.encode("utf-8")
-            temp_name = f".{name}.{uuid.uuid4().hex}.tmp"
-            temp_names.append(temp_name)
-            fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600, dir_fd=dir_fd)
-            try:
-                view = memoryview(expected)
-                while view:
-                    written = os.write(fd, view)
-                    if written <= 0:
-                        raise OSError("short artifact write")
-                    view = view[written:]
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            device, inode = reopen_exact(temp_name, expected)
-            prepared.append((temp_name, name, device, inode))
-
-        try:
-            require_pathname_identities()
-            for temp_name, name, device, inode in prepared:
-                os.link(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
-                owned.append((name, device, inode))
-            require_pathname_identities()
-            for _temp_name, name, device, inode in prepared:
-                published = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-                if (published.st_dev, published.st_ino) != (device, inode):
-                    raise OSError("published artifact inode verification failed")
-            os.fsync(dir_fd)
-        except Exception:
-            for name, device, inode in reversed(owned):
-                try:
-                    current = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-                    if (current.st_dev, current.st_ino) == (device, inode):
-                        os.unlink(name, dir_fd=dir_fd)
-                except FileNotFoundError:
-                    pass
-            os.fsync(dir_fd)
-            raise
-        checks = dict(PAIR_PUBLICATION_CHECKS)
-        if expected_app_root is not None and expected_directory_identity is not None:
-            checks["expected_root_and_directory_identities_verified"] = True
-        return checks
-    finally:
-        for temp_name in temp_names:
-            try:
-                os.unlink(temp_name, dir_fd=dir_fd)
-            except FileNotFoundError:
-                pass
-        os.close(dir_fd)
-
-
 def append_jsonl_no_follow(path: Path, payload: dict[str, Any]) -> None:
     """Append one locked JSONL record through a pinned, non-symlink path."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -928,6 +883,7 @@ def contract(status: str, risk_level: str) -> dict[str, Any]:
         "purpose": "Produce a truthful, resumable, spec-only Agent Spec before any separately approved build.",
         "interview_dimensions": list(FOUNDRY_DIMENSIONS),
         "dimension_statuses": ["answered", "inferred", "missing"],
+        "capability_vocabulary": list(CAPABILITIES),
         "readiness_dimensions": list(READINESS_DIMENSIONS),
         "readiness_statuses": sorted(READINESS_STATUSES),
         "approval_statuses": sorted(APPROVAL_STATUSES),

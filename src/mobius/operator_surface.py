@@ -15,7 +15,7 @@ from . import RELEASE_VERSION
 from . import foundry
 
 ALLOWED_OUTCOMES = ("accepted", "edited", "rejected", "ignored")
-OPERATOR_BRIEF_MAX_LINES = 40
+OPERATOR_BRIEF_MAX_LINES = 50
 MAX_OUTCOME_NOTE_CHARS = 2000
 OUTCOMES_FILENAME = "outcomes.jsonl"
 RUNS_FILENAME = "runs.jsonl"
@@ -38,6 +38,12 @@ def recommended_next_action(state: Mapping[str, Any]) -> str:
     intake = state.get("foundry_intake") or {}
     incomplete = bool((intake.get("completeness") or {}).get("missing"))
     if decision == "needs_interview" or (questions and incomplete):
+        suggested = state.get("suggested_answers_path")
+        if suggested:
+            return (
+                f"Edit the suggested answers in `{suggested}`, then resume run `{run_id}` "
+                f"with --answers-json pointing at that file."
+            )
         if pending:
             return (
                 f"Answer the interview questions and review the pending approval gates, "
@@ -48,7 +54,7 @@ def recommended_next_action(state: Mapping[str, Any]) -> str:
         return f"A human must resolve the pending approval gates for run `{run_id}`. Do not build or execute."
     if quality == "needs_revision":
         return f"Revise the spec until quality is pass, then re-run `{run_id}`."
-    if decision in {"spec_ready", "ready_to_execute"}:
+    if decision == "spec_ready":
         return (
             f"Spec is ready. Möbius did not execute anything. "
             f"If the brief helped: mobius --record-outcome {run_id} --outcome accepted"
@@ -93,9 +99,26 @@ def render_operator_brief(state: Mapping[str, Any]) -> str:
     else:
         lines.append("- none")
     lines.append("")
+    dismissed = list((state.get("risk_assessment") or {}).get("dismissed_signals") or [])[:3]
+    if dismissed:
+        lines += ["## Dismissed risk signals", ""]
+        lines += [f"- {item.get('canonical_action')}: \"{item.get('evidence')}\" (you said it is not needed)" for item in dismissed]
+        lines.append("")
     if questions:
         lines += ["## Interview questions", ""]
         lines += [f"{index}. {question}" for index, question in enumerate(questions, 1)]
+        lines.append("")
+    assist = state.get("assist") or {}
+    if assist:
+        lines += ["## Suggested by model", ""]
+        if assist.get("status") != "ok":
+            lines.append(f"- `--assist` {assist.get('status')}: {assist.get('error') or 'no suggestions'}")
+        follow_ups = list(assist.get("follow_up_questions") or [])[:3]
+        lines += [f"- {question}" for question in follow_ups]
+        if state.get("suggested_answers_path"):
+            lines.append(f"- Draft answers to review: `{state.get('suggested_answers_path')}`")
+        if assist.get("status") == "ok" and not follow_ups and not state.get("suggested_answers_path"):
+            lines.append("- nothing to add")
         lines.append("")
     lines += [
         "## Files",

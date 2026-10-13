@@ -152,6 +152,6 @@ def test_quality_non_ready_still_not_pass():
         },
         "success_criteria": True, "verifier_plan": True, "budget_policy": True,
         "execution_loop": True, "json_spec_path": "s.json", "checkpoint_path": "c.json",
-        "patch_evaluation": True, "decision": "needs_interview",
+        "decision": "needs_interview",
     })
     assert out["quality_status"] == "not_evaluated"

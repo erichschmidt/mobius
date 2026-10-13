@@ -4,6 +4,7 @@
   "inputs": ["local Markdown notes in the project folder"],
   "outputs": ["a local Markdown digest in the project folder"],
   "tools": ["read-only filesystem"],
+  "capabilities": ["local_writes"],
   "memory": "Keep only the latest digest in the project folder.",
   "cadence": "weekly",
   "human_gate": "A person reads the local draft. Nothing is sent or published.",

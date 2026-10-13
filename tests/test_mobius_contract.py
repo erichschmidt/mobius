@@ -55,7 +55,7 @@ def test_basic_run_writes_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(mobius, "DEFAULT_HISTORY_DIR", tmp_path / ".mobius" / "history")
     monkeypatch.setattr(mobius, "RUN_HISTORY_PATH", tmp_path / ".mobius" / "history" / "runs.jsonl")
     state = mobius.run_graph("Prepare a bounded local-only smoke test", "internal", run_id="pytest_smoke")
-    assert state["decision"] in {"spec_ready", "ready_to_execute", "needs_interview", "human_approval_required"}
+    assert state["decision"] in {"spec_ready", "needs_interview", "human_approval_required"}
     assert Path(state["report_path"]).exists()
     assert Path(state["json_spec_path"]).exists()
     assert Path(state["checkpoint_path"]).exists()
@@ -70,7 +70,7 @@ def test_quality_review_spec_ready_high_score_passes():
         },
         "success_criteria": True, "verifier_plan": True, "budget_policy": True,
         "execution_loop": True, "json_spec_path": "s.json", "checkpoint_path": "c.json",
-        "patch_evaluation": True, "decision": "spec_ready",
+        "decision": "spec_ready",
     }
     out = mobius.quality_review_spec(state)
     assert out["quality_score"] >= 80
@@ -89,7 +89,7 @@ def test_quality_review_spec_ready_low_score_needs_revision():
 
 
 def test_quality_review_spec_non_ready_decision_is_not_evaluated_even_with_high_score():
-    # Regression: any decision other than ready_to_execute used to report "pass"
+    # Regression: any decision other than spec_ready used to report "pass"
     # regardless of score, masking low-quality or unevaluated specs.
     high_score_state = {
         "mode": "bounded_control_loop",
@@ -99,7 +99,7 @@ def test_quality_review_spec_non_ready_decision_is_not_evaluated_even_with_high_
         },
         "success_criteria": True, "verifier_plan": True, "budget_policy": True,
         "execution_loop": True, "json_spec_path": "s.json", "checkpoint_path": "c.json",
-        "patch_evaluation": True, "decision": "needs_interview",
+        "decision": "needs_interview",
     }
     for decision in ("needs_interview", "human_approval_required"):
         state = dict(high_score_state, decision=decision)
