@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e '.[dev]'
+      - run: python -m pip install -e '.[dev,assist]'
       - run: python -m py_compile src/mobius/*.py
       - run: pytest -q
       - run: mobius --doctor
@@ -46,7 +46,8 @@ jobs:
               assert "mobius = mobius.cli:main" in wheel.read(entry_points).decode()
               metadata = next(name for name in names if name.endswith(".dist-info/METADATA"))
               meta_text = wheel.read(metadata).decode()
-              assert "Requires-Dist: langgraph" in meta_text
+              assert "Requires-Dist: langgraph" not in meta_text  # plain pipeline since 2.1.0
+              assert "Requires-Dist: anthropic" in meta_text and "extra == \"assist\"" in meta_text
           PY
           python -m venv "$CLEAN/venv"
           "$CLEAN/venv/bin/pip" install "$WHEEL"

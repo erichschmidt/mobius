@@ -14,19 +14,12 @@ import os
 from typing import Any, Literal, TypedDict
 import json
 import re
-import subprocess
-import sys
 
 from . import RELEASE_VERSION
+from . import assist as model_assist
 from . import foundry
 from . import operator_surface
 from . import reporting
-
-try:
-    from langgraph.graph import END, StateGraph
-except Exception:  # pragma: no cover - tests verify LangGraph in this env
-    END = "__end__"
-    StateGraph = None  # type: ignore
 
 GoalType = Literal["code", "research", "writing", "system_admin", "notes_project", "business_ops", "unknown"]
 RiskLevel = Literal["low", "medium", "high"]
@@ -34,10 +27,6 @@ ScaffoldContext = Literal["internal", "client_work", "public_repo", "throwaway_s
 Decision = Literal["spec_ready", "needs_interview", "human_approval_required"]
 
 APP_DIR = Path(os.environ.get("MOBIUS_APP_DIR", Path.cwd() / ".mobius")).absolute()
-# Self-patch lane root: the package source tree itself. Only reachable via
-# --self-patch (opt-in, loud); the default lane stays scoped to APP_DIR.
-SELF_PATCH_ROOT = Path(__file__).resolve().parent
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPORT_DIR = APP_DIR / "runs"
 DEFAULT_SPEC_DIR = APP_DIR / "specs"
 DEFAULT_CHECKPOINT_DIR = APP_DIR / "checkpoints"
@@ -67,16 +56,9 @@ GRAPH_NODE_ORDER = [
     "record_run_history",
 ]
 
-# Möbius only writes specs. Agent intake and plain objectives share one pipeline.
-FOUNDRY_NODE_ORDER = list(GRAPH_NODE_ORDER)
-
-RISK_TERMS = {
-    "send", "email", "post", "publish", "delete", "remove", "trade", "buy", "purchase",
-    "credential", "secret", "token", "production", "customer", "client", "outreach", "public",
-}
 CODE_TERMS = {"build", "code", "app", "script", "cli", "api", "test", "repo", "implement", "fix", "debug", "verify", "self", "check"}
 RESEARCH_TERMS = {"research", "compare", "evaluate", "analyze", "find", "source", "summarize", "investigate"}
-WRITING_TERMS = {"write", "draft", "article", "post", "copy", "brief", "memo", "proposal"}
+WRITING_TERMS = {"write", "draft", "article", "post", "copy", "brief", "memo", "proposal", "digest", "newsletter"}
 SYSTEM_TERMS = {"server", "cron", "config", "env", "service", "logs", "backup", "dashboard"}
 NOTES_TOOL_TERMS = {"obsidian", "vault"}
 BUSINESS_TERMS = {"client", "lead", "sales", "campaign", "sponsor", "launch"}
@@ -90,22 +72,6 @@ class MobiusState(TypedDict, total=False):
     goal_rubric: dict[str, Any]
     rubric_score: dict[str, Any]
     approval_packet: dict[str, Any]
-    product_contract: dict[str, Any]
-    product_status: dict[str, Any]
-    artifact_router: dict[str, Any]
-    method_basis_ledger: dict[str, Any]
-    sectioned_artifact_pipeline: dict[str, Any]
-    state_key_schema: dict[str, Any]
-    interactive_dashboard_contract: dict[str, Any]
-    deep_agent_harness_contract: dict[str, Any]
-    subagent_delegation_matrix: dict[str, Any]
-    context_filesystem_policy: dict[str, Any]
-    human_interrupt_policy: dict[str, Any]
-    context_compaction_policy: dict[str, Any]
-    artifact_contract: dict[str, Any]
-    decision_ledger: dict[str, Any]
-    constraint_ledger: dict[str, Any]
-    verification_contract: dict[str, Any]
     run_history_path: str
     scaffold_context: ScaffoldContext
     risk_level: RiskLevel
@@ -113,10 +79,10 @@ class MobiusState(TypedDict, total=False):
     assumptions: list[str]
     scaffold_recommendation: dict[str, Any]
     working_spec: dict[str, Any]
-    enable_venture_loop: bool
-    venture_loop: dict[str, Any]
     agent_foundry_contract: dict[str, Any]
     answers: dict[str, Any]
+    assist: dict[str, Any]
+    suggested_answers_path: str
     foundry_intake: dict[str, Any]
     risk_assessment: dict[str, Any]
     approval_gates: list[dict[str, Any]]
@@ -133,7 +99,6 @@ class MobiusState(TypedDict, total=False):
     execution_loop: dict[str, Any]
     json_spec_path: str
     checkpoint_path: str
-    loop_summary: dict[str, Any]
     resumed_from_checkpoint: str
     quality_score: int
     quality_status: str
@@ -145,13 +110,19 @@ class MobiusState(TypedDict, total=False):
     execution_authorized: bool
     side_effects_performed: list[str]
     resume_diagnostics: dict[str, Any]
-    resume_package: dict[str, Any]
     parent_run_id: str
     errors: list[str]
 
 
+def _stem(token: str) -> str:
+    # Plural/third-person "s" only, so "writes" matches "write" and "tests" matches "test".
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
 def _tokens(text: str) -> set[str]:
-    return set(re.findall(r"[a-zA-Z0-9_]+", text.lower()))
+    return {_stem(token) for token in re.findall(r"[a-zA-Z0-9_]+", text.lower())}
 
 
 def _contains_any(text: str, terms: set[str]) -> bool:
@@ -177,7 +148,10 @@ def intake_objective(state: MobiusState) -> MobiusState:
 
 
 def classify_goal(state: MobiusState) -> MobiusState:
-    text = f"{state.get('objective','')} {state.get('context_hint') or ''}".lower()
+    # "Build an agent that writes a digest" is a writing job, not a code job:
+    # classify what the agent would do, not the request to build one.
+    task = foundry.agent_task_text(state.get("objective", ""))
+    text = f"{task} {state.get('context_hint') or ''}".lower()
     if _contains_any(text, CODE_TERMS):
         gt: GoalType = "code"
     elif _contains_any(text, RESEARCH_TERMS):
@@ -305,8 +279,7 @@ def reason_about_scaffold(state: MobiusState) -> MobiusState:
         "spike": "throwaway_spike",
         "notes_only": "notes_only",
         "notes": "notes_only",
-        # older spellings
-        "notes_only": "notes_only",
+        # older spelling
         "obsidian": "notes_only",
     }
 
@@ -320,7 +293,7 @@ def reason_about_scaffold(state: MobiusState) -> MobiusState:
         context = "throwaway_spike"
     elif "obsidian" in text or "vault" in text:
         context = "notes_only"
-    elif "internal" in text or state.get("goal_type") in {"code", "system_admin", "research"}:
+    elif "internal" in text or "local" in text or state.get("goal_type") in {"code", "system_admin", "research", "writing"}:
         context = "internal"
     else:
         context = "unknown"
@@ -368,70 +341,9 @@ def build_working_spec(state: MobiusState) -> MobiusState:
         spec["expected_artifacts"] = ["Markdown note/update", "link/index update", "read-back verification"]
     else:
         spec["expected_artifacts"] = ["clarified spec", "success criteria", "final report"]
-    if spec.get("agent_foundry"):
+    if spec.get("agent_intake"):
         spec["expected_artifacts"] = list(dict.fromkeys([*spec.get("expected_artifacts", []), "Agent Spec", "interview questions", "build path decision", "registration plan"]))
-    if state.get("enable_venture_loop"):
-        spec["venture_loop"] = {
-            "purpose": "Turn a raw product idea into business, GTM, MVP, validation, and Mobius execution handoff artifacts.",
-            "mode": "extension_loop_option",
-        }
     return {**state, "working_spec": spec}
-
-
-def build_venture_loop(state: MobiusState) -> MobiusState:
-    if not state.get("enable_venture_loop"):
-        return {**state, "venture_loop": {"version": "mobius.venture_loop.v0.1", "status": "skipped", "reason": "enable_venture_loop not set"}}
-    loop = {
-        "version": "mobius.venture_loop.v0.1",
-        "status": "ready_option",
-        "positioning": "Domain extension that sharpens product and business ideas into clearer objectives before an agent spec is written.",
-        "artifact_sequence": [
-            "idea_intake",
-            "problem_customer_hypothesis",
-            "market_scan_brief",
-            "business_plan",
-            "go_to_market_strategy",
-            "mvp_spec",
-            "validation_plan",
-            "risk_and_assumption_register",
-            "mobius_execution_handoff",
-        ],
-        "business_plan_sections": [
-            "customer and painful job",
-            "offer and wedge",
-            "revenue model and pricing assumptions",
-            "startup and monthly cost assumptions",
-            "unit economics scenarios",
-            "operating model",
-            "risks requiring professional review",
-        ],
-        "gtm_sections": [
-            "first narrow buyer",
-            "wedge promise",
-            "first 10 customers path",
-            "channels and launch sequence",
-            "landing-page messaging",
-            "validation metric",
-        ],
-        "mvp_sections": [
-            "v0 scope",
-            "user stories",
-            "manual concierge fallback",
-            "build artifacts",
-            "verification checklist",
-        ],
-        "approval_boundaries": [
-            "no purchases or paid tools",
-            "no public posting or prospect outreach",
-            "no domain/entity/legal/tax actions",
-            "no production deploy without explicit approval",
-        ],
-        "handoff_contract": {
-            "to_mobius": "MVP spec, artifact list, approval decisions, verifier plan, and bounded next build step.",
-            "from_mobius": "reports, checkpoints, run history, doctor health, and safe file-change execution.",
-        },
-    }
-    return {**state, "venture_loop": loop}
 
 
 def build_agent_foundry_contract(state: MobiusState) -> MobiusState:
@@ -450,11 +362,12 @@ def build_agent_foundry_contract(state: MobiusState) -> MobiusState:
             "runtime_recommendation": {"selected": None, "reasons": ["Not an agent-intake request."]},
         }
 
-    intake = foundry.build_intake(objective, state.get("context_hint"), state.get("answers"))
+    intake = foundry.build_intake(objective, state.get("context_hint"), state.get("answers"), _model_drafts(state))
     risk_assessment = state.get("risk_assessment") or foundry.assess_risk_sources(
         objective,
         state.get("context_hint"),
         state.get("answers"),
+        model_findings=_model_findings(state),
     )
     gates = foundry.build_approval_gates(
         risk_assessment,
@@ -477,12 +390,23 @@ def build_agent_foundry_contract(state: MobiusState) -> MobiusState:
     }
 
 
+def _model_findings(state: MobiusState) -> list[dict[str, Any]]:
+    assist = state.get("assist") or {}
+    return list(assist.get("capabilities") or []) if assist.get("status") == "ok" else []
+
+
+def _model_drafts(state: MobiusState) -> dict[str, Any]:
+    assist = state.get("assist") or {}
+    return dict(assist.get("draft_answers") or {}) if assist.get("status") == "ok" else {}
+
+
 def detect_risk_and_ambiguity(state: MobiusState) -> MobiusState:
     objective = state.get("objective", "")
     assessment = foundry.assess_risk_sources(
         objective,
         state.get("context_hint"),
         state.get("answers"),
+        model_findings=_model_findings(state),
     )
     risk: RiskLevel = assessment["level"]
     text = objective.lower()
@@ -505,8 +429,10 @@ def generate_interview_if_needed(state: MobiusState) -> MobiusState:
     intake = state.get("foundry_intake") or {}
     if intake.get("status") != "not_applicable":
         missing = list((intake.get("completeness") or {}).get("missing") or [])
+        unconfirmed = list((state.get("risk_assessment") or {}).get("unconfirmed_signals") or [])
         qs.extend(foundry.interview_questions_for_dimensions(missing))
-        if missing:
+        qs.extend(foundry.interview_questions_for_signals(unconfirmed))
+        if missing or unconfirmed:
             decision: Decision = "needs_interview"
         elif state.get("pending_approval_gates"):
             qs.extend(foundry.interview_questions_for_gates(state["pending_approval_gates"]))
@@ -526,7 +452,7 @@ def generate_interview_if_needed(state: MobiusState) -> MobiusState:
         qs.append("What artifact should count as done: code/app, CLI, report, note, PR, or something else?")
         qs.append("What is the smallest useful version you would accept for v0?")
     if risk in {"medium", "high"}:
-        qs.append("Should Mobius operate draft-only, or is it allowed to make local changes after backups?")
+        qs.append("Should the work be draft-only, or may it change local files after taking a backup?")
     if risk == "high":
         qs.append("Confirm the approval boundary for risky actions: public posting, third-party sends, purchases/trades, deletions, credentials, or production changes.")
     decision = "human_approval_required" if risk == "high" else ("needs_interview" if qs else "spec_ready")
@@ -563,9 +489,10 @@ def define_success_criteria(state: MobiusState) -> MobiusState:
 
 
 def design_budget_policy(state: MobiusState) -> MobiusState:
-    """Create explicit cost/runaway controls before any worker loop exists.
+    """Propose cost and runaway limits for whatever eventually does this work.
 
-    Metered or capped execution backends may apply; Mobius treats every loop as budgeted by default.
+    Möbius itself runs once and stops; these limits belong in the spec so the
+    eventual agent or person starts bounded.
     """
     text = state.get("objective", "").lower()
     risk_reasons: list[str] = []
@@ -574,38 +501,28 @@ def design_budget_policy(state: MobiusState) -> MobiusState:
     if state.get("risk_level") != "low":
         risk_reasons.append(f"Risk level is {state.get('risk_level')}; budget and approval gates should be stricter.")
     if state.get("ambiguity_score", 0) >= 4:
-        risk_reasons.append("Ambiguous objectives can burn tokens while searching for a spec; interview first.")
+        risk_reasons.append("Ambiguous objectives burn time and tokens; settle the spec first.")
 
     policy = {
-        "estimated_cost_mode": "oauth_capped",
-        "api_metered_ready": True,
+        "applies_to": "the eventual implementation, not this Möbius run",
         "max_iterations": 3,
-        "max_worker_runs": 3,
-        "max_reviewer_runs": 3,
         "max_minutes": 45,
         "max_consecutive_failures": 2,
         "require_progress_delta_each_iteration": True,
         "requires_budget_review": bool(risk_reasons),
         "risk_reasons": risk_reasons,
-        "future_api_controls": {
-            "max_input_tokens_per_run": 120000,
-            "max_output_tokens_per_run": 12000,
-            "max_estimated_usd_per_goal": 5.00,
-            "hard_stop_on_missing_usage": True,
-            "warn_at_budget_percent": 80,
-        },
         "runaway_stop_conditions": [
             "no measurable progress after one iteration",
             "same failure repeats twice",
-            "worker asks for broader scope than approved",
-            "usage/cost telemetry missing on API-backed run",
-            "estimated budget reaches warning threshold",
+            "work needs broader scope than approved",
+            "cost or usage cannot be measured",
+            "estimated budget reaches its warning threshold",
             "human approval boundary encountered",
         ],
     }
     if risk_reasons and state.get("decision") in {"spec_ready"} and (state.get("foundry_intake") or {}).get("status") == "not_applicable":
         existing_questions = list(state.get("interview_questions") or [])
-        existing_questions.append("This objective may create token/cost runaway risk. Confirm the budget cap, max iterations, and whether API-metered execution is allowed.")
+        existing_questions.append("This sounds open-ended. What caps should the work have on iterations, time, and cost?")
         return {**state, "budget_policy": policy, "decision": "needs_interview", "interview_questions": existing_questions}
     return {**state, "budget_policy": policy}
 
@@ -615,8 +532,7 @@ def design_execution_loop(state: MobiusState) -> MobiusState:
     loop = {
         "max_iterations": budget.get("max_iterations", 3),
         "max_minutes": budget.get("max_minutes", 45),
-        "max_worker_runs": budget.get("max_worker_runs", 3),
-        "worker_mode": "Mobius CLI run or spawned local worker depending on task size",
+        "applies_to": "the eventual implementation, not this Möbius run",
         "iteration_steps": [
             "select next concrete task from spec",
             "execute bounded work",
@@ -631,7 +547,6 @@ def design_execution_loop(state: MobiusState) -> MobiusState:
             "two consecutive failures with the same root cause",
             "no measurable progress delta after an iteration",
             "token/cost budget threshold reached",
-            "usage telemetry missing during API-metered run",
             "risk boundary encountered",
             "required user decision missing",
         ],
@@ -710,476 +625,12 @@ def build_approval_packet(state: MobiusState) -> MobiusState:
     return {**state, "approval_packet": packet}
 
 
-def define_product_contract(state: MobiusState) -> MobiusState:
-    contract = {
-        "product_version": RELEASE_VERSION,
-        "stability": "stable",
-        "stable_workflows": [
-            "spec_to_report",
-            "foundry_intake",
-            "checkpoint_resume",
-            "doctor_health_check",
-            "run_history",
-            "operator_brief",
-            "bounded_local_verification",
-        ],
-        "non_goals": [
-            "arbitrary_shell",
-            "unapproved_public_or_third_party_actions",
-            "credential_handling",
-            "production_changes_without_explicit_scope",
-            "forever_loops",
-            "build_or_activate_agents_by_default",
-        ],
-        "operating_contract": "Use as a pre-agent constitution: spec, interview, and bounded local verification before any build work.",
-    }
-    rubric_score = state.get("rubric_score") or {}
-    product_status = {
-        "status": "ready" if rubric_score.get("passed", False) and state.get("decision") != "needs_interview" else "needs_review",
-        "reason": "Core loop: spec, agent intake, checkpointing, history, operator brief, and doctor are available.",
-    }
-    return {**state, "product_contract": contract, "product_status": product_status}
-
-
-def _artifact_mode_from_objective(objective: str) -> str:
-    text = objective.lower()
-    if "interview" in text and any(term in text for term in ["artifact", "playbook", "html", "markdown", "document"]):
-        return "interview_to_artifact"
-    if any(term in text for term in ["html", "markdown", "playbook", "artifact", "deck", "report"]):
-        return "artifact_delivery"
-    return "bounded_spec"
-
-
-def _artifact_class_from_objective(objective: str) -> str:
-    text = objective.lower()
-    if any(term in text for term in ["launch package", "launch system", "field lab", "validation tracker"]):
-        return "launch_package"
-    if "governance packet" in text or "private governance" in text:
-        return "governance_packet"
-    if any(term in text for term in ["playbook", "operating playbook"]):
-        return "operating_playbook"
-    if any(term in text for term in ["html dashboard", "dashboard"]):
-        return "dashboard"
-    if any(term in text for term in ["code", "repo", "implement", "test"]):
-        return "code_change"
-    if any(term in text for term in ["research", "analyze", "compare", "synthesis"]):
-        return "research_synthesis"
-    return "bounded_spec"
-
-
-def route_artifact(state: MobiusState) -> MobiusState:
-    objective = state.get("objective", "")
-    text = objective.lower()
-    artifact_class = _artifact_class_from_objective(objective)
-    shareability = "private_internal" if any(term in text for term in ["private", "internal", "governance", "approval gate"]) else "reviewable_internal"
-    if any(term in text for term in ["public", "shareable", "client-facing", "parent one-pager", "sponsor package"]):
-        shareability = "mixed_private_and_shareable"
-    outputs = ["json_spec", "checkpoint", "markdown_report"]
-    if any(term in text for term in ["html", "dashboard"]):
-        outputs.append("html_dashboard")
-    if any(term in text for term in ["markdown", "command center", "note"]):
-        outputs.append("markdown_artifact")
-    if any(term in text for term in ["governance", "decision ledger", "constraint ledger"]):
-        outputs.append("private_governance_packet")
-    if "validation tracker" in text:
-        outputs.append("validation_tracker")
-    checks = ["artifact_paths_written", "json_spec_written", "checkpoint_written", "markdown_report_written"]
-    if "html_dashboard" in outputs:
-        checks.append("html_parse_or_browser_check")
-    if any(term in text for term in ["approval", "outreach", "public", "sponsor"]):
-        checks.append("approval_gate")
-    if shareability in {"private_internal", "mixed_private_and_shareable"}:
-        checks.append("shareability_boundary_review")
-    router = {
-        "version": "mobius.artifact_router.v2.2",
-        "artifact_class": artifact_class,
-        "shareability": shareability,
-        "destination_policy": {
-            "scratch": ".mobius/",
-            "durable": "project_or_vault_destination_selected_by_scaffold_context",
-            "shareable": "explicitly_marked_shareable_only",
-            "private": "private_governance_or_internal_packet",
-        },
-        "required_outputs": list(dict.fromkeys(outputs)),
-        "verification_checks": list(dict.fromkeys(checks)),
-    }
-    return {**state, "artifact_router": router}
-
-
-def build_method_basis_ledger(state: MobiusState) -> MobiusState:
-    goal_type = state.get("goal_type", "unknown")
-    context = state.get("scaffold_context", "unknown")
-    objective = state.get("objective", "").lower()
-    practices = ["ground-in-existing-notes"] if context in {"notes_only", "internal", "client_work"} else []
-    if goal_type == "business_ops" or any(term in objective for term in ["launch", "sponsor", "business", "validation"]):
-        practices.append("validate-the-business-case")
-    if goal_type == "code" or any(term in objective for term in ["repo", "implement", "test", "push"]):
-        practices.append("test-first")
-    if "dashboard" in objective or "html" in objective:
-        practices.append("design-review")
-    ledger = {
-        "version": "mobius.method_basis_ledger.v3.0",
-        "recommended_practices": list(dict.fromkeys(practices)),
-        "source_hierarchy": [
-            "project_notes",
-            "local_repo_or_files",
-            "live_tool_state",
-            "web_sources",
-            "user_interview_answers",
-        ],
-        "method_assumptions": [
-            "Load relevant methods before producing durable artifacts.",
-            "Prefer existing project context before generic generation.",
-            "Record excluded methods when a tempting but wrong workflow is avoided.",
-        ],
-        "governing_context": context,
-    }
-    return {**state, "method_basis_ledger": ledger}
-
-
-def build_sectioned_artifact_pipeline(state: MobiusState) -> MobiusState:
-    router = state.get("artifact_router", {})
-    artifact_class = router.get("artifact_class", "bounded_spec")
-    enabled = artifact_class in {"launch_package", "governance_packet", "operating_playbook", "dashboard", "research_synthesis"}
-    phases = [
-        "outline_contract",
-        "section_generation",
-        "coherence_review",
-        "constraint_review",
-        "final_render",
-        "verification_report",
-    ] if enabled else ["single_spec_generation", "verification_report"]
-    pipeline = {
-        "version": "mobius.sectioned_artifact_pipeline.v2.2",
-        "enabled": enabled,
-        "phases": phases,
-        "completion_rule": "Long artifacts must pass coherence and constraint review before final render.",
-        "review_focus": [
-            "audience_fit",
-            "missing_sections",
-            "private_vs_shareable_boundary",
-            "approval_gates",
-            "artifact_paths",
-        ],
-    }
-    return {**state, "sectioned_artifact_pipeline": pipeline}
-
-
-def build_state_key_schema(state: MobiusState) -> MobiusState:
-    run_id = state.get("run_id") or _new_run_id()
-    objective = state.get("objective", "").lower()
-    project = "example" if any(term in objective for term in ["launch", "example-project"]) else "mobius"
-    keys = [
-        f"run:{run_id}:objective",
-        f"run:{run_id}:artifact_router",
-        f"run:{run_id}:method_basis",
-        f"run:{run_id}:interview_state",
-        f"run:{run_id}:decision_ledger",
-        f"run:{run_id}:constraint_ledger",
-        f"run:{run_id}:artifact_contract",
-        f"run:{run_id}:verification_report",
-    ]
-    project_keys = [
-        f"project:{project}:active_goals",
-        f"project:{project}:latest_dashboard",
-        f"project:{project}:latest_validation_tracker",
-    ]
-    schema = {
-        "version": "mobius.state_key_schema.v2.2",
-        "key_style": "hierarchical colon-delimited keys",
-        "keys": keys,
-        "project_keys": project_keys,
-        "durability_rule": "Run state must be reconstructable from JSON spec, checkpoint, and project artifacts.",
-    }
-    return {**state, "state_key_schema": schema}
-
-
-def build_interactive_dashboard_contract(state: MobiusState) -> MobiusState:
-    router = state.get("artifact_router", {})
-    outputs = router.get("required_outputs", [])
-    objective = state.get("objective", "").lower()
-    enabled = "html_dashboard" in outputs or "dashboard" in objective
-    panels = ["run_summary", "decision_ledger", "constraint_ledger", "verification_status"]
-    if any(term in objective for term in ["launch", "validation", "example-project"]):
-        panels += ["launch_readiness", "validation_signals", "approval_gates"]
-    contract = {
-        "version": "mobius.interactive_dashboard_contract.v2.2",
-        "enabled": enabled,
-        "panels": list(dict.fromkeys(panels)),
-        "interaction_model": "static_local_first_with_future_script_backed_updates",
-        "no_browser_storage_rule": "Do not rely on browser localStorage/sessionStorage for durable state; persist via files or explicit backend scripts.",
-    }
-    return {**state, "interactive_dashboard_contract": contract}
-
-
-def build_deep_agent_harness_contract(state: MobiusState) -> MobiusState:
-    """Adapt Deep Agents/Claude-Code-style harness principles into Mobius.
-
-    This is not a dependency on deepagents. It records the transferable operating
-    ideas: explicit plan tool, isolated subagents, filesystem-backed context,
-    human interrupts, and bounded context compaction.
-    """
-    goal_type = state.get("goal_type", "unknown")
-    risk_level = state.get("risk_level", "low")
-    objective = state.get("objective", "").lower()
-    contract = {
-        "version": "mobius.deep_agent_harness.v2.3",
-        "inspiration_source": "langchain-ai/deepagents commit 6a37792 plus official LangChain Deep Agents docs",
-        "adopted_principles": [
-            "opinionated defaults for long-horizon work",
-            "explicit planning/todo state before tool execution",
-            "specialized subagents with isolated context windows",
-            "filesystem-backed scratch/artifact memory instead of transcript-only memory",
-            "human-in-the-loop interrupts for sensitive tools",
-            "context compaction before large tool output floods the control loop",
-            "tool/sandbox boundaries enforce safety; prompts only describe intent",
-        ],
-        "mobius_interpretation": "Mobius remains the deterministic control layer; Deep-Agents-style workers are optional execution specialists under Mobius gates.",
-        "when_to_use_deep_agent_worker": goal_type in {"code", "research", "writing", "business_ops"} and risk_level != "high",
-        "never_delegate_silently": [
-            "public posting or outreach",
-            "purchases, trades, payments, or account changes",
-            "credential handling",
-            "broad deletion or production changes",
-        ],
-        "fit_notes": [
-            "Use LangGraph directly when Mobius needs custom graph control.",
-            "Use a Deep-Agents-style harness when the inner worker needs planning, files, skills, and subagent delegation.",
-            "Pass compiled LangGraph agents into the worker layer only after contract tests exist.",
-        ],
-        "objective_signals": [term for term in ["repo", "research", "dashboard", "launch", "artifact", "code", "playbook"] if term in objective],
-    }
-    return {**state, "deep_agent_harness_contract": contract}
-
-
-def build_subagent_delegation_matrix(state: MobiusState) -> MobiusState:
-    goal_type = state.get("goal_type", "unknown")
-    risk_level = state.get("risk_level", "low")
-    base_roles = [
-        {
-            "name": "researcher",
-            "description": "Collect source/context evidence and return only distilled findings with paths/URLs.",
-            "tools": "read/search/web only by default",
-            "approval": "no external side effects",
-        },
-        {
-            "name": "builder",
-            "description": "Make bounded local changes from an approved spec or change set.",
-            "tools": "app-root file edits plus allowlisted verifier commands",
-            "approval": "requires approved patch/change_set for writes",
-        },
-        {
-            "name": "reviewer",
-            "description": "Grade the result against the rubric and list gaps before Mobius reports done.",
-            "tools": "read/test evidence; no writes",
-            "approval": "read-only",
-        },
-    ]
-    if goal_type in {"writing", "business_ops", "notes_project"}:
-        base_roles.append({
-            "name": "artifact_writer",
-            "description": "Turn ledgers and outline contracts into sectioned Markdown/HTML artifacts.",
-            "tools": "draft artifacts under the selected project folder",
-            "approval": "shareable/external outputs require human review",
-        })
-    matrix = {
-        "version": "mobius.subagent_delegation_matrix.v2.3",
-        "delegation_rule": "Delegate only work that would bloat Mobius context or benefits from a specialist role; parent sees final summary plus artifact paths.",
-        "default_roles": base_roles,
-        "state_pass_through": ["objective", "working_spec", "goal_rubric", "artifact_router", "constraint_ledger", "verification_contract"],
-        "state_excluded_from_child_return": ["raw_tool_output", "credentials", "full_transcript", "unverified_intermediate_notes"],
-        "parallelism_policy": "researcher and reviewer may run independently; builder waits for approval packet and preflight.",
-        "high_risk_override": "If risk_level is high, subagents may draft plans/reviews only; execution remains blocked until explicit approval.",
-        "recommended_now": risk_level != "high" and goal_type in {"code", "research", "writing", "business_ops", "notes_project"},
-    }
-    return {**state, "subagent_delegation_matrix": matrix}
-
-
-def build_context_filesystem_policy(state: MobiusState) -> MobiusState:
-    run_id = state.get("run_id") or _new_run_id()
-    context = state.get("scaffold_context", "unknown")
-    policy = {
-        "version": "mobius.context_filesystem_policy.v2.3",
-        "principle": "Use files as the long-horizon working memory; keep the chat/control state small and auditable.",
-        "scratch_root": f".mobius/runs/{run_id}/scratch/",
-        "artifact_root": "project_or_vault_destination_selected_by_artifact_router",
-        "memory_scopes": {
-            "run_scoped": ["scratch notes", "raw research extracts", "temporary outlines"],
-            "project_scoped": ["decision ledgers", "constraint ledgers", "accepted specs", "verification reports"],
-            "user_profile": ["stable preferences only; never transient run progress"],
-        },
-        "backend_boundary": "virtual/app-root by default; host filesystem and shell are opt-in and allowlisted.",
-        "context_source_order": (state.get("method_basis_ledger") or {}).get("source_hierarchy", []),
-        "sensitive_data_rule": "Never persist API keys, tokens, credentials, or private customer data in memory/skills/artifacts.",
-        "governing_context": context,
-    }
-    return {**state, "context_filesystem_policy": policy}
-
-
-def build_human_interrupt_policy(state: MobiusState) -> MobiusState:
-    risk = state.get("risk_level", "low")
-    policy = {
-        "version": "mobius.human_interrupt_policy.v2.3",
-        "decision_types": ["approve", "edit", "reject"],
-        "respond_rule": "Use respond only when the human is answering a question; never use it to deny a side-effecting tool as if the tool succeeded.",
-        "interrupt_on": {
-            "delete_or_remove": {"allowed_decisions": ["approve", "edit", "reject"], "default": "reject"},
-            "external_send_post_publish_outreach": {"allowed_decisions": ["approve", "reject"], "default": "reject"},
-            "purchase_trade_payment_account_change": {"allowed_decisions": ["approve", "reject"], "default": "reject"},
-            "credential_or_secret_access": {"allowed_decisions": ["reject"], "default": "reject"},
-            "local_write_patch": {"allowed_decisions": ["approve", "edit", "reject"], "default": "requires_preflight"},
-            "read_only_research": {"allowed_decisions": [], "default": "auto_allowed"},
-        },
-        "checkpointer_required": True,
-        "current_run_gate": "human_approval_required" if risk == "high" else "normal_mobius_approval_packet",
-    }
-    return {**state, "human_interrupt_policy": policy}
-
-
-def build_context_compaction_policy(state: MobiusState) -> MobiusState:
-    policy = {
-        "version": "mobius.context_compaction_policy.v2.3",
-        "trigger_conditions": [
-            "tool output exceeds reportable summary size",
-            "more than one specialist worker produces intermediate artifacts",
-            "run spans multiple checkpoints or sessions",
-            "raw source material would obscure the decision ledger",
-        ],
-        "retention_shape": {
-            "keep_in_state": ["final finding", "artifact path", "score", "decision", "open question"],
-            "write_to_files": ["raw extracts", "full test output", "long source notes", "draft variants"],
-            "discard_or_archive": ["duplicate failed attempts", "irrelevant search results", "unselected drafts after decision is recorded"],
-        },
-        "summary_contract": "Every compaction must preserve source path/URL, confidence, reason, and next action.",
-        "quality_gate": "Reviewer must be able to reconstruct why Mobius made the recommendation from compacted artifacts.",
-    }
-    return {**state, "context_compaction_policy": policy}
-
-
-def build_artifact_contract(state: MobiusState) -> MobiusState:
-    """Declare the durable outputs a Mobius run must leave behind.
-
-    This makes Mobius different from a single prompt: the run records a machine-readable
-    output contract before it writes specs/checkpoints/reports.
-    """
-    objective = state.get("objective", "")
-    text = objective.lower()
-    mode = _artifact_mode_from_objective(objective)
-    outputs = ["markdown_report", "json_spec", "checkpoint", "run_history"]
-    if "html" in text:
-        outputs.append("html")
-    if "markdown" in text or "playbook" in text or "document" in text:
-        outputs.append("markdown")
-    if "decision ledger" in text or mode == "interview_to_artifact":
-        outputs.append("decision_ledger")
-    if "constraint" in text or mode == "interview_to_artifact":
-        outputs.append("constraint_ledger")
-    contract = {
-        "version": "mobius.artifact_contract.v2.1",
-        "mode": mode,
-        "required_outputs": list(dict.fromkeys(outputs)),
-        "artifact_governance": [
-            "capture interview state before final artifact generation",
-            "record decisions, assumptions, and constraints in machine-readable form",
-            "define verification checks before reporting completion",
-            "persist ledgers to JSON spec, checkpoint, and Markdown report",
-        ],
-        "completion_rule": "Do not call an artifact run complete until required outputs are written and verification checks are recorded.",
-    }
-    return {**state, "artifact_contract": contract}
-
-
-def build_decision_ledger(state: MobiusState) -> MobiusState:
-    spec = state.get("working_spec", {})
-    contract = state.get("artifact_contract", {})
-    entries = [
-        {
-            "decision": f"Use {contract.get('mode', 'bounded_spec')} as the primary artifact mode.",
-            "reason": "The objective determines whether Mobius should create a simple spec or a governed artifact package.",
-        },
-        {
-            "decision": f"Treat {state.get('goal_type', 'unknown')} as the goal profile.",
-            "reason": "The goal profile selects success criteria, verifier focus, and quality rubric.",
-        },
-        {
-            "decision": f"Use {state.get('scaffold_context', 'unknown')} as the scaffold context.",
-            "reason": "Context controls location, risk posture, and how much approval is required before execution.",
-        },
-        {
-            "decision": "Persist JSON spec, checkpoint, run history, and Markdown report for auditability.",
-            "reason": "A prompt transcript is not enough; Mobius needs durable run evidence and resume artifacts.",
-        },
-    ]
-    if spec.get("expected_artifacts"):
-        entries.append({
-            "decision": "Use the working spec expected artifacts as the output backbone.",
-            "reason": ", ".join(spec.get("expected_artifacts", [])),
-        })
-    ledger = {
-        "version": "mobius.decision_ledger.v2.1",
-        "entries": entries,
-        "open_decisions": state.get("interview_questions", []),
-    }
-    return {**state, "decision_ledger": ledger}
-
-
-def build_constraint_ledger(state: MobiusState) -> MobiusState:
-    objective = state.get("objective", "")
-    text = objective.lower()
-    forbidden_terms = []
-    if "forbidden project names" in text:
-        forbidden_terms = ["ExampleBrand", "InternalCodename", "ClientProject"]
-    constraints = list((state.get("working_spec") or {}).get("non_goals", []))
-    constraints += [
-        "Respect the scaffold context and audience boundaries.",
-        "Keep risky actions draft-only unless explicitly approved.",
-        "Record assumptions rather than silently inventing missing context.",
-    ]
-    if forbidden_terms:
-        constraints.append("Run a forbidden-term scan before marking the artifact safe to share.")
-    ledger = {
-        "version": "mobius.constraint_ledger.v2.1",
-        "constraints": list(dict.fromkeys(constraints)),
-        "forbidden_terms": forbidden_terms,
-        "approval_boundaries": (state.get("approval_packet") or {}).get("required_approvals", []),
-        "risk_level": state.get("risk_level"),
-    }
-    return {**state, "constraint_ledger": ledger}
-
-
-def build_verification_contract(state: MobiusState) -> MobiusState:
-    artifact_contract = state.get("artifact_contract", {})
-    required = [
-        "json_spec_written",
-        "checkpoint_written",
-        "markdown_report_written",
-        "required_sections_present",
-    ]
-    outputs = artifact_contract.get("required_outputs", [])
-    if "html" in outputs:
-        required.append("html_parse_or_browser_check")
-    if (state.get("constraint_ledger") or {}).get("forbidden_terms"):
-        required.append("forbidden_term_scan")
-    if state.get("verifier_plan"):
-        required.append("domain_verifier_plan_review")
-    contract = {
-        "version": "mobius.verification_contract.v2.1",
-        "required_checks": list(dict.fromkeys(required)),
-        "evidence_to_record": [
-            "artifact paths",
-            "test or smoke command output",
-            "constraint scan result",
-            "human review gates when required",
-        ],
-        "completion_rule": "Final response must cite real written artifacts and verification evidence.",
-    }
-    return {**state, "verification_contract": contract}
-
-
 def finalize_foundry_spec(state: MobiusState) -> MobiusState:
-    """Write standalone Agent Specs only after all intake dimensions resolve."""
+    """Write standalone Agent Specs only after every intake dimension and risk signal resolves."""
     intake = state.get("foundry_intake") or {}
     if intake.get("status") == "not_applicable" or not (intake.get("completeness") or {}).get("complete"):
+        return {**state, "agent_spec": {}}
+    if (state.get("risk_assessment") or {}).get("unconfirmed_signals"):
         return {**state, "agent_spec": {}}
     spec = foundry.build_agent_spec(
         run_id=str(state.get("run_id") or _new_run_id()),
@@ -1240,21 +691,11 @@ def export_json_spec(state: MobiusState) -> MobiusState:
         "budget_policy": state.get("budget_policy", {}),
         "execution_loop": state.get("execution_loop", {}),
         "interview_questions": state.get("interview_questions", []),
+        "assist": state.get("assist") or None,
         "safety_boundary": (state.get("working_spec") or {}).get("non_goals", []),
     }
     foundry.atomic_write_new(path, json.dumps(_safe_json_value(payload), indent=2))
     return {**state, "json_spec_path": str(path)}
-
-
-def _build_loop_summary(state: MobiusState) -> dict[str, Any]:
-    """Summarize the run. Möbius only writes specs, so nothing is ever executed."""
-    return {
-        "version": "2.0",
-        "bounded": True,
-        "status": "completed",
-        "final_recommendation": "spec_only",
-        "max_iterations": (state.get("budget_policy") or {}).get("max_iterations", 3),
-    }
 
 
 def write_checkpoint(state: MobiusState) -> MobiusState:
@@ -1293,7 +734,6 @@ def write_checkpoint(state: MobiusState) -> MobiusState:
         "json_spec_path": state.get("json_spec_path"),
         "budget_policy": state.get("budget_policy", {}),
         "execution_loop": state.get("execution_loop", {}),
-        "loop_summary": state.get("loop_summary", _build_loop_summary(state)),
         "quality_score": state.get("quality_score"),
         "quality_status": state.get("quality_status"),
         "report_path": state.get("report_path") or str(DEFAULT_REPORT_DIR / f"{run_id}_mobius_spec.md"),
@@ -1327,8 +767,7 @@ def record_run_history(state: MobiusState) -> MobiusState:
         "risk_level": state.get("risk_level"),
         "risk_assessment": state.get("risk_assessment", {}),
         "rubric_score": (state.get("rubric_score") or {}).get("score"),
-        "product_status": (state.get("product_status") or {}).get("status"),
-        "loop_status": (state.get("loop_summary") or {}).get("status"),
+        "assist": _assist_summary(state.get("assist")),
         "foundry_completeness": (state.get("foundry_intake") or {}).get("completeness", {}),
         "runtime_recommendation": state.get("runtime_recommendation", {}),
         "readiness": state.get("readiness", {}),
@@ -1378,8 +817,6 @@ def quality_review_spec(state: MobiusState) -> MobiusState:
         score += 10
     if state.get("json_spec_path") and state.get("checkpoint_path"):
         score += 10
-    if state.get("patch_evaluation"):
-        score += 10
     if state.get("decision") in {"spec_ready"}:
         score += 5
     score = min(score, 100)
@@ -1396,11 +833,28 @@ def _markdown_report(state: MobiusState) -> str:
     return reporting.render_markdown_report(state)
 
 
+def _assist_summary(assist: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not assist:
+        return None
+    keys = ("status", "model", "request_id", "usage", "error")
+    return {key: assist.get(key) for key in keys if assist.get(key) is not None}
+
+
+def _suggested_answers(state: MobiusState) -> dict[str, Any]:
+    missing = list(((state.get("foundry_intake") or {}).get("completeness") or {}).get("missing") or [])
+    return model_assist.suggested_answers(state.get("assist"), dict(state.get("answers") or {}), missing)
+
+
 def write_report(state: MobiusState) -> MobiusState:
     root = foundry.ensure_artifact_root(DEFAULT_REPORT_DIR, APP_DIR)
     run_id = foundry.validate_run_id(str(state.get("run_id") or _new_run_id()))
-    next_action = operator_surface.recommended_next_action(state)
-    updated: MobiusState = {**state, "recommended_next_action": next_action}
+    updated: MobiusState = dict(state)  # type: ignore[assignment]
+    suggested = _suggested_answers(state)
+    if suggested:
+        suggested_path = root / f"{run_id}_suggested_answers.json"
+        foundry.atomic_write_new(suggested_path, json.dumps(suggested, indent=2, ensure_ascii=False))
+        updated["suggested_answers_path"] = str(suggested_path)
+    updated["recommended_next_action"] = operator_surface.recommended_next_action(updated)
     trace_path = root / f"{run_id}_mobius_spec.md"
     brief_path = root / f"{run_id}_brief.md"
     updated["report_path"] = str(trace_path)
@@ -1410,18 +864,20 @@ def write_report(state: MobiusState) -> MobiusState:
     return updated
 
 
-def build_graph(node_order: list[str] | None = None):
-    if StateGraph is None:
-        raise RuntimeError("langgraph is not installed")
-    order = node_order or GRAPH_NODE_ORDER
-    graph = StateGraph(MobiusState)
-    for node in order:
-        graph.add_node(node, globals()[node])
-    for a, b in zip(order, order[1:]):
-        graph.add_edge(a, b)
-    graph.add_edge(order[-1], END)
-    graph.set_entry_point(order[0])
-    return graph.compile()
+class Pipeline:
+    """Run the steps in a fixed order; each step takes the state and returns the next one."""
+
+    def __init__(self, steps: list[Any]):
+        self.steps = steps
+
+    def invoke(self, state: MobiusState) -> MobiusState:
+        for step in self.steps:
+            state = step(state)
+        return state
+
+
+def build_graph(node_order: list[str] | None = None) -> Pipeline:
+    return Pipeline([globals()[name] for name in node_order or GRAPH_NODE_ORDER])
 
 
 def _effective_agent_spec_dir() -> Path:
@@ -1432,13 +888,15 @@ def _effective_agent_spec_dir() -> Path:
     return app / "agent_specs"
 
 
-def _expected_run_artifacts(run_id: str, include_agent_spec: bool) -> list[Path]:
+def _expected_run_artifacts(run_id: str, include_agent_spec: bool, include_suggestions: bool = False) -> list[Path]:
     paths = [
         foundry.ensure_artifact_root(DEFAULT_SPEC_DIR, APP_DIR) / f"{run_id}_mobius_spec.json",
         foundry.ensure_artifact_root(DEFAULT_CHECKPOINT_DIR, APP_DIR) / f"{run_id}_checkpoint.json",
         foundry.ensure_artifact_root(DEFAULT_REPORT_DIR, APP_DIR) / f"{run_id}_mobius_spec.md",
         foundry.ensure_artifact_root(DEFAULT_REPORT_DIR, APP_DIR) / f"{run_id}_brief.md",
     ]
+    if include_suggestions:
+        paths.append(foundry.ensure_artifact_root(DEFAULT_REPORT_DIR, APP_DIR) / f"{run_id}_suggested_answers.json")
     if include_agent_spec:
         agent_root = foundry.ensure_artifact_root(_effective_agent_spec_dir(), APP_DIR)
         paths.extend([
@@ -1448,8 +906,8 @@ def _expected_run_artifacts(run_id: str, include_agent_spec: bool) -> list[Path]
     return paths
 
 
-def _preflight_run_artifacts(run_id: str, include_agent_spec: bool) -> list[Path]:
-    paths = _expected_run_artifacts(run_id, include_agent_spec)
+def _preflight_run_artifacts(run_id: str, include_agent_spec: bool, include_suggestions: bool = False) -> list[Path]:
+    paths = _expected_run_artifacts(run_id, include_agent_spec, include_suggestions)
     collisions = [str(path) for path in paths if path.exists() or path.is_symlink()]
     if collisions:
         raise FileExistsError(f"refusing run because artifact paths already exist: {', '.join(collisions)}")
@@ -1463,7 +921,13 @@ def run_graph(
     answers: dict[str, Any] | None = None,
     resume_checkpoint: str | None = None,
     foundry_mode: bool | None = None,
+    assist: dict[str, Any] | None = None,
 ) -> MobiusState:
+    """Run the pipeline once and write its artifacts.
+
+    ``assist`` is the result of ``assist.request_suggestions`` when the
+    person passed ``--assist``; it is advisory and recorded in the spec.
+    """
     resume_data: dict[str, Any] = {}
     if resume_checkpoint:
         resume_data = foundry.load_resume_checkpoint(resume_checkpoint)
@@ -1477,7 +941,7 @@ def run_graph(
     foundry.reject_secret_values(objective, context_hint)
     spec_only_foundry = bool(foundry_mode) if foundry_mode is not None else bool(answers or resume_checkpoint or foundry.is_agent_request(objective))
     selected_run_id = foundry.validate_run_id(run_id) if run_id else _new_run_id()
-    _preflight_run_artifacts(selected_run_id, spec_only_foundry)
+    _preflight_run_artifacts(selected_run_id, spec_only_foundry, bool(assist and assist.get("status") == "ok"))
     initial: MobiusState = {
         "objective": objective,
         "context_hint": context_hint,
@@ -1488,8 +952,10 @@ def run_graph(
         "resume_diagnostics": {"ignored_untrusted_fields": resume_data.get("ignored_derived_fields", [])},
         "mode": "foundry_spec_only" if spec_only_foundry else "bounded_control_loop",
         # Möbius writes specs and stops; it never runs commands or edits files.
+        # The only outside contact is the opt-in --assist request, recorded here.
         "execution_authorized": False,
-        "side_effects_performed": [],
+        "side_effects_performed": ["network: Anthropic API (--assist)"] if model_assist.made_network_call(assist) else [],
+        "assist": assist or {},
     }
     tracker_token, owned_artifacts = foundry.begin_artifact_tracking()
     try:
@@ -1501,39 +967,10 @@ def run_graph(
         foundry.end_artifact_tracking(tracker_token)
 
 
-def resume_from_checkpoint(checkpoint_path: str) -> MobiusState:
-    """Inspect a v1 checkpoint through the strict loader.
-
-    This compatibility helper never restores derived authority, approvals,
-    decisions, execution flags, or artifact paths. Call ``run_graph`` with
-    ``resume_checkpoint=...`` to recompute a new spec-only revision.
-    """
-    payload = foundry.load_resume_checkpoint(checkpoint_path)
-    return {
-        "objective": payload["objective"],
-        "context_hint": payload["context_hint"],
-        "answers": payload["answers"],
-        "parent_run_id": str(payload.get("parent_run_id") or ""),
-        "resume_package": {
-            "can_resume": True,
-            "checkpoint_path": str(Path(checkpoint_path)),
-            "ignored_untrusted_fields": payload.get("ignored_derived_fields", []),
-            "recommended_next_action": "Call run_graph(..., resume_checkpoint=path); all risk, approval, readiness, runtime, decision, execution, and artifact fields will be recomputed.",
-        },
-        "resumed_from_checkpoint": str(Path(checkpoint_path)),
-    }
-
 def run_doctor() -> dict[str, Any]:
     checks: dict[str, str] = {}
-    checks["langgraph_runtime"] = "pass" if StateGraph is not None and END is not None else "fail"
-    graph_compile = subprocess.run([sys.executable, "-m", "py_compile", str(Path(__file__).resolve())], text=True, capture_output=True, timeout=60)
-    checks["graph_py_compile"] = "pass" if graph_compile.returncode == 0 else "fail"
-    repo_root = Path(__file__).resolve().parents[2]
-    test_sources = list((repo_root / "tests").glob("test_*.py"))
-    checks["pytest_collects_source"] = "pass" if test_sources else "not_applicable"
-    wrapper = Path(__file__).resolve().parent / "cli.py"
-    wrapper_compile = subprocess.run([sys.executable, "-m", "py_compile", str(wrapper)], text=True, capture_output=True, timeout=60)
-    checks["wrapper_callable"] = "pass" if wrapper.exists() and wrapper_compile.returncode == 0 else "fail"
+    missing_steps = [name for name in GRAPH_NODE_ORDER if not callable(globals().get(name))]
+    checks["pipeline_steps"] = "fail" if missing_steps else "pass"
     try:
         foundry.ensure_artifact_root(DEFAULT_HISTORY_DIR, APP_DIR)
         checks["artifact_root_safety"] = "pass"
@@ -1569,38 +1006,8 @@ def summarize_for_cli(state: MobiusState) -> str:
         "brief_path": state.get("brief_path"),
         "checkpoint_path": state.get("checkpoint_path"),
         "agent_spec": state.get("agent_spec_json_path") or None,
+        **({"assist": _assist_summary(state.get("assist"))} if state.get("assist") else {}),
+        **({"suggested_answers": state["suggested_answers_path"]} if state.get("suggested_answers_path") else {}),
     }, indent=2)
 
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Möbius v1 pre-agent constitution")
-    parser.add_argument("objective")
-    parser.add_argument("--context", default=None)
-    parser.add_argument("--execute-local", action="store_true", help="Run allowlisted local worker commands inside the Mobius app root")
-    parser.add_argument("--worker-command", action="append", default=[], help="Allowlisted worker command; may be repeated")
-    parser.add_argument("--execute-patch", action="store_true", help="Apply one exact allowlisted local patch before verification")
-    parser.add_argument("--patch-file", default=None)
-    parser.add_argument("--patch-old", default=None)
-    parser.add_argument("--patch-new", default=None)
-    parser.add_argument("--patch-description", default="")
-    parser.add_argument("--execute-rollback", action="store_true", help="Restore from patch backup only when evaluator recommends rollback")
-    args = parser.parse_args()
-    patch_request = {}
-    if args.execute_patch:
-        patch_request = {
-            "file_path": args.patch_file,
-            "old_string": args.patch_old,
-            "new_string": args.patch_new,
-            "description": args.patch_description,
-        }
-    result = run_graph(
-        args.objective,
-        args.context,
-        execute_local=args.execute_local,
-        worker_commands=args.worker_command,
-        execute_patch=args.execute_patch,
-        patch_request=patch_request,
-        execute_rollback=args.execute_rollback,
-    )
-    print(summarize_for_cli(result))

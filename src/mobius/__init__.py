@@ -1,2 +1,2 @@
-RELEASE_VERSION = "2.0"
+RELEASE_VERSION = "2.1"
 __version__ = f"{RELEASE_VERSION}.0"

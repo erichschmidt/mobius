@@ -15,6 +15,7 @@ COMPLETE_SAFE_ANSWERS = {
     "inputs": ["local JSON status files"],
     "outputs": ["local Markdown digest"],
     "tools": ["read-only filesystem"],
+    "capabilities": ["local_writes"],
     "memory": "Store only the latest digest in the project folder.",
     "cadence": "weekly",
     "human_gate": "No external actions; review the local draft manually.",
@@ -107,7 +108,12 @@ def test_complete_safe_intake_writes_standalone_specs_and_one_runtime(tmp_path, 
 
 def test_complete_risky_intake_exposes_pending_gate_and_blocked_readiness(tmp_path, monkeypatch):
     isolate_runtime(tmp_path, monkeypatch)
-    answers = {**COMPLETE_SAFE_ANSWERS, "outputs": ["email to customers"], "human_gate": "Ask me before every send"}
+    answers = {
+        **COMPLETE_SAFE_ANSWERS,
+        "outputs": ["email to customers"],
+        "human_gate": "Ask me before every send",
+        "capabilities": ["external_send", "local_writes"],
+    }
     state = mobius.run_graph(
         "Build an agent to send a customer email every Friday",
         "internal",
@@ -152,7 +158,7 @@ def test_history_contains_final_foundry_fields_and_existing_artifacts_remain(tmp
         answers=COMPLETE_SAFE_ANSWERS,
     )
     history = json.loads(Path(state["run_history_path"]).read_text().splitlines()[-1])
-    assert history["product_version"] == "2.0"
+    assert history["product_version"] == mobius.RELEASE_VERSION
     assert history["report_path"] == state["report_path"]
     assert history["json_spec_path"] == state["json_spec_path"]
     assert history["checkpoint_path"] == state["checkpoint_path"]
@@ -527,11 +533,11 @@ def test_owned_cleanup_refuses_renamed_parent_symlink_and_outside_hardlink(tmp_p
     assert (moved_parent / artifact.name).read_text() == "owned"
 
 
-def test_doctor_fails_when_langgraph_runtime_is_unavailable(monkeypatch):
-    monkeypatch.setattr(mobius, "StateGraph", None)
+def test_doctor_fails_when_a_pipeline_step_is_missing(monkeypatch):
+    monkeypatch.setattr(mobius, "write_report", None)
     result = mobius.run_doctor()
     assert result["status"] == "fail"
-    assert result["checks"]["langgraph_runtime"] == "fail"
+    assert result["checks"]["pipeline_steps"] == "fail"
 
 
 def test_weekly_digest_example_reaches_spec_ready(tmp_path, monkeypatch):

@@ -4,48 +4,9 @@ from __future__ import annotations
 from typing import Any, Mapping
 import json
 
-_V22_ARTIFACT_CLASSES = {
-    "launch_package",
-    "governance_packet",
-    "operating_playbook",
-    "dashboard",
-    "research_synthesis",
-}
-
 
 def _json_block(value: Any) -> list[str]:
     return ["```json", json.dumps(value, indent=2), "```", ""]
-
-
-def include_v22_contracts(state: Mapping[str, Any]) -> bool:
-    router = state.get("artifact_router") or {}
-    pipeline = state.get("sectioned_artifact_pipeline") or {}
-    dashboard = state.get("interactive_dashboard_contract") or {}
-    artifact_class = router.get("artifact_class", "bounded_spec")
-    baseline_outputs = {"json_spec", "checkpoint", "markdown_report"}
-    extra_outputs = set(router.get("required_outputs") or []) - baseline_outputs
-    return (
-        artifact_class in _V22_ARTIFACT_CLASSES
-        or bool(pipeline.get("enabled"))
-        or bool(dashboard.get("enabled"))
-        or bool(extra_outputs)
-    )
-
-
-def include_v23_contracts(state: Mapping[str, Any]) -> bool:
-    objective = (state.get("objective") or "").lower()
-    if "deepagent" in objective or "deep agent" in objective:
-        return True
-    harness = state.get("deep_agent_harness_contract") or {}
-    return bool(harness.get("objective_signals"))
-
-
-def include_artifact_governance(state: Mapping[str, Any]) -> bool:
-    contract = state.get("artifact_contract") or {}
-    if contract.get("mode") == "interview_to_artifact":
-        return True
-    objective = (state.get("objective") or "").lower()
-    return "decision ledger" in objective or "constraint ledger" in objective
 
 
 def include_foundry_detail(state: Mapping[str, Any]) -> bool:
@@ -59,11 +20,6 @@ def include_risk_detail(state: Mapping[str, Any]) -> bool:
     risk = state.get("risk_level", "low")
     assessment = state.get("risk_assessment") or {}
     return risk != "low" or bool(assessment.get("actions"))
-
-
-def include_venture_loop(state: Mapping[str, Any]) -> bool:
-    venture = state.get("venture_loop") or {}
-    return venture.get("status") not in {None, "skipped"}
 
 
 def render_markdown_report(state: Mapping[str, Any]) -> str:
@@ -137,48 +93,9 @@ def render_markdown_report(state: Mapping[str, Any]) -> str:
                 "",
             ]
 
-    if include_v22_contracts(state):
-        lines += ["## Artifact Router", ""]
-        lines += _json_block(state.get("artifact_router", {}))
-        lines += ["## Method Basis Ledger", ""]
-        lines += _json_block(state.get("method_basis_ledger", {}))
-        lines += ["## Sectioned Artifact Pipeline", ""]
-        lines += _json_block(state.get("sectioned_artifact_pipeline", {}))
-        lines += ["## State Key Schema", ""]
-        lines += _json_block(state.get("state_key_schema", {}))
-        lines += ["## Interactive Dashboard Contract", ""]
-        lines += _json_block(state.get("interactive_dashboard_contract", {}))
-
-    if include_v23_contracts(state):
-        lines += ["## Deep Agent Harness Contract", ""]
-        lines += _json_block(state.get("deep_agent_harness_contract", {}))
-        lines += ["## Subagent Delegation Matrix", ""]
-        lines += _json_block(state.get("subagent_delegation_matrix", {}))
-        lines += ["## Context Filesystem Policy", ""]
-        lines += _json_block(state.get("context_filesystem_policy", {}))
-        lines += ["## Human Interrupt Policy", ""]
-        lines += _json_block(state.get("human_interrupt_policy", {}))
-        lines += ["## Context Compaction Policy", ""]
-        lines += _json_block(state.get("context_compaction_policy", {}))
-
-    if include_artifact_governance(state):
-        lines += ["## Artifact Contract", ""]
-        lines += _json_block(state.get("artifact_contract", {}))
-        lines += ["## Decision Ledger", ""]
-        lines += _json_block(state.get("decision_ledger", {}))
-        lines += ["## Constraint Ledger", ""]
-        lines += _json_block(state.get("constraint_ledger", {}))
-        lines += ["## Verification Contract", ""]
-        lines += _json_block(state.get("verification_contract", {}))
-
-    if include_venture_loop(state):
-        lines += [
-            "## Venture/Product Extension Loop",
-            "",
-            "Business Plan / GTM Strategy / MVP Spec / Validation Plan / Mobius Handoff",
-            "",
-        ]
-        lines += _json_block(state.get("venture_loop", {}))
+    if state.get("assist"):
+        lines += ["## Model Assist (advisory)", ""]
+        lines += _json_block(state.get("assist"))
 
     lines += [
         "## JSON Spec and Checkpoint",

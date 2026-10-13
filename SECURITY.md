@@ -1,12 +1,13 @@
 # Security Policy
 
-Möbius writes inspectable specs under `.mobius/`. It does not contact third parties, read your mail, run commands, or change files outside `.mobius/`.
+Möbius writes inspectable specs under `.mobius/`. It does not read your mail, run commands, or change files outside `.mobius/`. It contacts no one, except that the opt-in `--assist` flag sends your sentence and intake answers to the Anthropic API.
 
 ## Supported versions
 
 | Version | Supported |
 |---------|-----------|
-| 2.0.x   | Yes       |
+| 2.1.x   | Yes       |
+| 2.0.x   | Security fixes only |
 | 1.0.x   | Security fixes only |
 | < 1.0   | No        |
 
@@ -36,4 +37,5 @@ Version 2.0.0 removed every execution path (local commands, patches, change sets
 ## Scope notes
 
 - Möbius is spec-only. There are no execution flags.
+- `--assist` makes one network request. Inputs are checked for secret-looking values before it is sent, and Möbius never reads, asks for, or stores an API key; the Anthropic SDK resolves credentials. Model output cannot approve anything, lower risk, or answer a question for you; if you find a way to make it do so, that is a vulnerability.
 - 1.0.x shipped opt-in, allowlisted execution lanes (including `--self-patch`); they are not present in 2.x.

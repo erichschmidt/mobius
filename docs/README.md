@@ -3,7 +3,7 @@
 | Doc | What it covers |
 |---|---|
 | [Architecture](architecture.md) | The fixed run, the files it writes, and the safety boundary |
-| [Agent intake](agent_intake.md) | The twelve questions, risk rules, checkpoints |
+| [Agent intake](agent_intake.md) | The thirteen questions, the capabilities checklist, risk rules, checkpoints |
 | [CHANGELOG](../CHANGELOG.md) | Version history |
 
 ## Example

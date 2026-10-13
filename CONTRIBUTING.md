@@ -12,9 +12,11 @@ Thanks for your interest in Möbius. This project is intentionally conservative 
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-python -m pip install -e '.[dev]'
+source .venv/bin/activate
+python -m pip install -e '.[dev,assist]'
 ```
+
+Möbius is POSIX-only (Linux, macOS). The `assist` extra is only needed to run `tests/test_assist.py`; those tests use a fake client and never call the network.
 
 From the repo without installing:
 
@@ -28,7 +30,7 @@ PYTHONPATH=src pytest -q
 - Keep changes focused. One concern per PR when possible.
 - Add or update tests for behavior changes.
 - Do not commit secrets, credentials, client data, or personal host paths.
-- Preserve default safety: no network, no production writes, no silent execution in the default lane.
+- Preserve default safety: no network unless `--assist` is passed, no production writes, no execution.
 - Update [`CHANGELOG.md`](CHANGELOG.md) for user-visible changes.
 
 ## What we are unlikely to accept

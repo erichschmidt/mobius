@@ -10,17 +10,18 @@ The implementation lives in `foundry.py`. That filename is historical. The produ
 raw agent idea
 → classify the goal and setting
 → score risk from the objective, context, and answers
-→ fill twelve intake questions
+→ ask the thirteen intake questions (in the terminal, or from an answers file)
+→ ask about risky wording the capabilities checklist does not cover
 → flag contradictions and approval gates
 → evaluate readiness (mostly “not evaluated” until a later build)
-→ write a standalone Agent Spec when every question is answered
+→ write a standalone Agent Spec when every question and risk signal is resolved
 → write checkpoint, brief, and history
 → stop
 ```
 
 Risk is scored before the Agent Spec so the spec cannot claim “unknown” after the fact.
 
-## The twelve questions
+## The thirteen questions
 
 | Field | Question |
 |---|---|
@@ -29,6 +30,7 @@ Risk is scored before the Agent Spec so the spec cannot claim “unknown” afte
 | `inputs` | What sources or data does it read? |
 | `outputs` | What artifact, message, or state should it produce? |
 | `tools` | Which tools, APIs, or files would it need? |
+| `capabilities` | Which risky things may it do? A checklist; see below. |
 | `memory` | What may be retained, and where? |
 | `cadence` | One-shot, recurring, always-on, or event-driven? |
 | `human_gate` | When must a future implementation stop for approval? |
@@ -37,7 +39,44 @@ Risk is scored before the Agent Spec so the spec cannot claim “unknown” afte
 | `verification_plan` | What later evidence would prove it worked? |
 | `registration_path` | Where would an approved runbook live? (declarative only — Möbius does not write there) |
 
-Each field is `answered`, `inferred`, or `missing`. Missing fields produce `needs_interview`. No standalone Agent Spec is written until all twelve resolve.
+Each field is `answered`, `inferred`, `suggested`, or `missing`. `suggested` means `--assist` drafted a value that you have not accepted yet; it counts as missing. Missing fields produce `needs_interview`. No standalone Agent Spec is written until all thirteen resolve.
+
+## Capabilities: ask, don't guess
+
+`capabilities` is a list drawn from a fixed vocabulary, or `["none"]`:
+
+| Name | The agent may… |
+|---|---|
+| `external_send` | send messages or files to anyone (email, chat, uploads) |
+| `publish` | publish or post anything publicly |
+| `outreach_contact` | contact people (calls, DMs, prospecting) |
+| `purchase_payment_trade` | spend, pay, trade, or move money |
+| `credentials_secrets` | handle credentials, tokens, or other secrets |
+| `production_changes` | deploy or change production systems |
+| `destructive_deletion` | delete or remove data or files |
+| `system_of_record_writes` | write to a CRM, database, ticket system, or other system of record |
+| `shell_commands` | run shell commands or scripts |
+| `sensitive_data_access` | read customer, personal, or other sensitive data |
+| `local_writes` | create or edit local files |
+
+Declared capabilities are the authority. Everything except `local_writes` gets a pending approval gate.
+
+Möbius still scans your wording. When a phrase suggests a capability you did not declare, it becomes a question that quotes the phrase:
+
+> Your description says "…shares it with the team". Will the agent send messages or files to anyone? If yes, add `external_send` to capabilities; if not, add it to dismissed_signals.
+
+Until you answer, the run stays `needs_interview` and the wording still counts as requested. To answer in a file:
+
+```json
+{
+  "capabilities": ["local_writes"],
+  "dismissed_signals": ["external_send"]
+}
+```
+
+Dismissals are recorded in the risk assessment (`dismissed_signals`, with the quoted evidence) and listed in the brief. A capability cannot be both declared and dismissed. If you declare a capability that your `risk_boundary` forbids, that is a contradiction and blocks the spec.
+
+Answer files from 2.0 have no `capabilities`, so they resume as `needs_interview` with that one question open.
 
 ## CLI
 
@@ -83,9 +122,9 @@ Classifications: `requested`, `prohibited`, `approval_gated`, `mentioned`.
 
 A prohibition does not erase a request in another field. Conflict becomes `blocked_conflict`, raises risk, and blocks safety readiness.
 
-Covered families: external send/upload, publishing, outreach, purchases, credentials, production changes, destructive deletion, system-of-record writes, local writes.
+Covered families: external send/upload/share, publishing, outreach, purchases and money movement, credentials, production changes, destructive deletion, system-of-record writes, shell commands, local writes.
 
-This is phrase-level matching, not full language understanding. Ambiguous wording should be rewritten.
+This is phrase-level matching, not full language understanding. It will miss things and flag harmless phrases, which is why the capabilities checklist is the authority and the wording only raises questions. With `--assist`, Claude's findings are added as `source_field: "model"`, but only when their quoted evidence appears verbatim in your text. Model findings can add risk; they never remove it.
 
 ## Approval gates
 
@@ -97,8 +136,8 @@ Answers cannot self-approve. Approval state stored in a checkpoint is ignored.
 
 | Dimension | Meaning in v1 |
 |---|---|
-| `spec_completeness` | Passes only when all twelve questions are resolved. |
-| `safety_readiness` | Blocks on contradictory or unresolved gated authority. |
+| `spec_completeness` | Passes only when all thirteen questions are resolved. |
+| `safety_readiness` | Blocks on contradictory or unresolved gated authority; `not_evaluated` while risky wording is unconfirmed. |
 | `verification_evidence` | Stays `not_evaluated`. A written plan is not proof a run worked. |
 | `operational_readiness` | Stays `not_evaluated` or `blocked`. Möbius builds nothing. |
 
@@ -126,6 +165,7 @@ Intake writes stay under `.mobius/`:
 .mobius/checkpoints/<run>_checkpoint.json
 .mobius/runs/<run>_brief.md
 .mobius/runs/<run>_mobius_spec.md
+.mobius/runs/<run>_suggested_answers.json   # only with --assist
 .mobius/history/runs.jsonl
 ```
 
