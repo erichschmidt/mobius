@@ -164,7 +164,7 @@ There is no flag that turns the rest on. Version 1.0.0 had opt-in execution flag
 
 ## Status
 
-**2.1.0** — spec, interview, stop. Now with a capabilities checklist, an interview in the terminal, and an opt-in `--assist`. See the [changelog](CHANGELOG.md).
+**[2.1.0](https://github.com/erichschmidt/mobius/releases/tag/v2.1.0)** — spec, interview, stop. Now with a capabilities checklist, an interview in the terminal, and an opt-in `--assist`. See the [changelog](CHANGELOG.md).
 
 ---
 

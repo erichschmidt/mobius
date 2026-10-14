@@ -2,7 +2,9 @@
 
 All notable changes to Möbius are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [2.1.0] - Unreleased
+## [Unreleased]
+
+## [2.1.0] - 2026-10-13
 
 Möbius now asks instead of guessing. Risky actions are declared on a checklist, the interview happens in the terminal, and Claude can optionally draft the answers.
 
@@ -25,6 +27,7 @@ Möbius now asks instead of guessing. Risky actions are declared on a checklist,
 - `--doctor` no longer starts subprocesses (it used to run `py_compile`, which wrote `__pycache__` outside `.mobius/`).
 - The package is marked POSIX-only, which it already was in practice.
 - Answer files from 2.0 lack `capabilities`, so they resume as `needs_interview` with that one question open.
+- CI now tests Python 3.11–3.14 on Linux and macOS.
 
 ### Fixed
 
@@ -67,6 +70,7 @@ Initial public release. Write the rules for an AI agent before anyone writes the
 - `mobius --doctor` health checks for runtime, CLI, patch boundaries, and artifact safety.
 - Opt-in local execution and self-patch lanes (off by default; explicit flags required).
 
-[2.1.0]: https://github.com/erichschmidt/mobius/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/erichschmidt/mobius/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/erichschmidt/mobius/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/erichschmidt/mobius/releases/tag/v2.0.0
 [1.0.0]: https://github.com/erichschmidt/mobius/releases/tag/v1.0.0
