@@ -51,6 +51,7 @@ def test_readme_is_public_release_ready():
 def test_changelog_documents_current_release():
     text = Path("CHANGELOG.md").read_text(encoding="utf-8")
     lower = text.lower()
+    assert "## [2.1.0] - 2026-10-13" in text
     assert "## [2.0.0]" in text
     assert "## [1.0.0]" in text
     assert "initial public release" in lower
